@@ -1,0 +1,224 @@
+"""End-to-end dry runs of the pipeline with fake agents and a temporary git repo."""
+
+from __future__ import annotations
+
+import json
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from orchestrator.config.loader import load_config
+from orchestrator.intake.base import ExplicitKeys
+from orchestrator.pipeline.runtime import build_runtime
+from orchestrator.pipeline.scheduler import run_all
+from tests import fakes
+
+
+async def _run(config_path: Path, tracker: fakes.FakeTracker, keys: list[str]):
+    cfg = load_config(config_path)
+    rt = build_runtime(cfg, config_path, dry_run=True, keep_worktrees=True, tracker=tracker)
+    rt.store.create_run(rt.run_id, config_path, keys, True)
+    specs = await ExplicitKeys(tracker, keys).tasks()
+    results = await run_all(rt, specs)
+    return rt, results
+
+
+@pytest.mark.usefixtures("fake_runners")
+async def test_happy_path(config_path: Path, git_repo: tuple[Path, Path], shares: tuple[Path, Path]) -> None:
+    tracker = fakes.FakeTracker({"PROJ-1": fakes.issue("PROJ-1")})
+    rt, results = await _run(config_path, tracker, ["PROJ-1"])
+    task = results[0]
+    assert task.state == "DONE", task.error
+    assert task.outcome == "completed" and task.commit_sha and task.branch == "agent/proj-1-do-the-thing"
+    # one squashed commit on the branch containing the agent's change
+    wt = Path(task.worktree_path)
+    log = subprocess.run(
+        ["git", "log", "--oneline", "origin/develop..HEAD"], cwd=wt, capture_output=True, text=True
+    ).stdout
+    assert len(log.strip().splitlines()) == 1
+    assert (wt / "agent_change.txt").exists()
+    # context files landed in the worktree and are excluded from git
+    assert (wt / ".orchestrator" / "context" / "issue.md").exists()
+    status = subprocess.run(["git", "status", "--porcelain"], cwd=wt, capture_output=True, text=True).stdout
+    assert ".orchestrator" not in status
+    # the share copy happened through the audited helper
+    _, raid = shares
+    assert (raid / "agent-drops" / "SF1" / "input.pdf").exists()
+    audit = [json.loads(line) for line in rt.audit.path.read_text().splitlines()]
+    assert any(e["event"] == "share_copy" for e in audit)
+    assert task.worker_result["copied_files"][0]["to"].startswith("raid:")
+    # dry run: nothing external
+    assert tracker.comments == [] and tracker.transitions == []
+    assert any(e["event"] == "push_skipped" for e in audit) and any(e["event"] == "pr_skipped" for e in audit)
+    # the reviewer saw the diff and ran read-only
+    review_req = fakes.CALLS["reviewer"][0]
+    assert review_req.access.worktree == "read-only"
+    assert "agent_change.txt" in review_req.prompt
+    # the worker never received the orchestrator's tokens
+    worker_env = fakes.CALLS["worker"][0].env
+    assert "TEST_GITHUB_TOKEN" not in worker_env and "TEST_JIRA_TOKEN" not in worker_env
+    assert worker_env["TEST_WORKER_KEY"].startswith("secret-") and "TEST_REVIEWER_KEY" not in worker_env
+    assert (rt.task_dir("PROJ-1") / "pr-body.md").read_text().startswith("Resolves [PROJ-1]")
+    # secrets do not appear in the audit log
+    assert "secret-test" not in rt.audit.path.read_text()
+
+
+@pytest.mark.usefixtures("fake_runners")
+async def test_review_requests_changes_then_approves(config_path: Path) -> None:
+    fakes.SCRIPT["reviewer"].extend(
+        [
+            {
+                "verdict": "request_changes",
+                "findings": [
+                    {
+                        "severity": "major",
+                        "title": "needs a test",
+                        "path": "agent_change.txt",
+                        "detail": "add one",
+                    }
+                ],
+                "summary_markdown": "",
+            },
+            {
+                "verdict": "approve",
+                "findings": [{"severity": "nit", "title": "style"}],
+                "summary_markdown": "ok now",
+            },
+        ]
+    )
+    tracker = fakes.FakeTracker({"PROJ-2": fakes.issue("PROJ-2")})
+    rt, results = await _run(config_path, tracker, ["PROJ-2"])
+    task = results[0]
+    assert task.state == "DONE", task.error
+    assert task.round == 1
+    assert len(fakes.CALLS["worker"]) == 2
+    fix_req = fakes.CALLS["worker"][1]
+    assert "needs a test" in fix_req.prompt and fix_req.session == "worker-session"
+    body = (rt.task_dir("PROJ-2") / "pr-body.md").read_text()
+    assert "style" in body and "after 1 fix round" in body
+
+
+@pytest.mark.usefixtures("fake_runners")
+async def test_worker_blocked_produces_findings(config_path: Path) -> None:
+    fakes.SCRIPT["worker"].append(
+        {
+            "status": "blocked",
+            "summary": "",
+            "blocked": {
+                "reason": "ambiguous-requirements",
+                "details_markdown": "Which file?",
+                "questions_for_reporter": ["Which file?"],
+            },
+        }
+    )
+    tracker = fakes.FakeTracker({"PROJ-3": fakes.issue("PROJ-3")})
+    rt, results = await _run(config_path, tracker, ["PROJ-3"])
+    task = results[0]
+    assert task.state == "BLOCKED" and task.outcome == "blocked"
+    findings = Path(task.findings_path).read_text()
+    assert "ambiguous-requirements" in findings and "Which file?" in findings
+    assert Path(task.worktree_path).exists()  # kept for inspection
+    assert len(fakes.CALLS["reviewer"]) == 0
+
+
+@pytest.mark.usefixtures("fake_runners")
+async def test_rounds_exhausted_blocks(config_path: Path) -> None:
+    fakes.SCRIPT["reviewer"].extend(
+        [
+            {"verdict": "request_changes", "findings": [{"severity": "blocking", "title": f"bad {i}"}]}
+            for i in range(3)
+        ]
+    )
+    tracker = fakes.FakeTracker({"PROJ-4": fakes.issue("PROJ-4")})
+    rt, results = await _run(config_path, tracker, ["PROJ-4"])
+    task = results[0]
+    assert task.state == "BLOCKED"
+    assert task.round == 2 and len(fakes.CALLS["worker"]) == 3
+    assert "fix rounds (2)" in Path(task.findings_path).read_text()
+
+
+@pytest.mark.usefixtures("fake_runners")
+async def test_build_failure_triggers_fix_round(config_path: Path, config_dict: dict, tmp_path: Path) -> None:
+    import yaml
+
+    flag = tmp_path / "pass.flag"
+    config_dict["build"]["commands"] = [
+        f"python3 -c \"import sys,os; sys.exit(0 if os.path.exists('{flag}') else 1)\""
+    ]
+    config_path.write_text(yaml.safe_dump(config_dict))
+    # first worker call leaves the build failing; the fix round creates the flag
+    fakes.SCRIPT["worker"].extend(
+        [
+            {
+                "status": "completed",
+                "summary": "first try",
+                "changed_paths": ["agent_change.txt"],
+                "tests_selected": [],
+                "test_rationale": "",
+                "copied_files": [],
+                "_write": "v1",
+            },
+        ]
+    )
+    original = fakes.default_worker_output
+
+    def fixing(request):
+        flag.write_text("ok")
+        return original(request)
+
+    fakes.default_worker_output = fixing
+    try:
+        tracker = fakes.FakeTracker({"PROJ-5": fakes.issue("PROJ-5")})
+        rt, results = await _run(config_path, tracker, ["PROJ-5"])
+    finally:
+        fakes.default_worker_output = original
+    task = results[0]
+    assert task.state == "DONE", task.error
+    assert task.round == 1
+    assert "Build failed" in fakes.CALLS["worker"][1].prompt
+
+
+@pytest.mark.usefixtures("fake_runners")
+async def test_epic_expands_and_orders(config_path: Path) -> None:
+    epic = fakes.issue("PROJ-10", "Epic", issue_type="Epic")
+    a = fakes.issue("PROJ-11", "child a", raw={"parent": "PROJ-10"})
+    b = fakes.issue("PROJ-12", "child b", raw={"parent": "PROJ-10"}, blocked_by=["PROJ-11"])
+    tracker = fakes.FakeTracker({"PROJ-10": epic, "PROJ-11": a, "PROJ-12": b})
+    rt, results = await _run(config_path, tracker, ["PROJ-10"])
+    assert [t.key for t in results] == ["PROJ-11", "PROJ-12"]
+    assert all(t.state == "DONE" for t in results), [t.error for t in results]
+    assert results[1].depends_on == ["PROJ-11"]
+    # the dependent task started only after the first finished
+    started = {
+        k: next(ts for ts, s in t.history if s == "WORKING") for k, t in zip(("a", "b"), results, strict=True)
+    }
+    finished_a = results[0].history[-1][0]
+    assert started["b"] >= finished_a
+
+
+@pytest.mark.usefixtures("fake_runners")
+async def test_bare_reviewer_uses_prompt_and_parse_and_snapshot(config_path: Path, config_dict: dict) -> None:
+    import yaml
+
+    config_dict["agents"]["reviewer"]["runner"] = "fake-bare"
+    config_path.write_text(yaml.safe_dump(config_dict))
+    tracker = fakes.FakeTracker({"PROJ-6": fakes.issue("PROJ-6")})
+    rt, results = await _run(config_path, tracker, ["PROJ-6"])
+    task = results[0]
+    assert task.state == "DONE", task.error
+    req = fakes.CALLS["reviewer"][0]
+    assert req.prompt_and_parse is True
+    assert req.cwd != Path(task.worktree_path)  # throwaway snapshot for a runtime without read-only mode
+    assert not req.cwd.exists()  # removed afterwards
+
+
+@pytest.mark.usefixtures("fake_runners")
+async def test_resume_from_checkpoint(config_path: Path) -> None:
+    tracker = fakes.FakeTracker({"PROJ-7": fakes.issue("PROJ-7")})
+    rt, results = await _run(config_path, tracker, ["PROJ-7"])
+    task = results[0]
+    assert task.state == "DONE"
+    saved = rt.store.load_tasks(rt.run_id)["PROJ-7"]
+    assert saved.state == "DONE" and saved.commit_sha == task.commit_sha
+    assert rt.store.get_run(rt.run_id).keys == ["PROJ-7"]

@@ -1,0 +1,70 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dl-orchestrator"
+version = "0.1.0"
+description = "Turns Jira issues into reviewed GitHub pull requests using configurable agent runtimes in git worktrees."
+readme = "README.md"
+requires-python = ">=3.13"
+authors = [{ name = "Datalogics" }]
+# Keep in step with requirements.in, which is what mkenv installs into the venv.
+dependencies = [
+    "typer>=0.12",
+    "pydantic>=2.7",
+    "pyyaml>=6.0.1",
+    "httpx>=0.27",
+    "jinja2>=3.1",
+    "rich>=13.7",
+    "structlog>=24.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.5",
+    "mypy>=1.10",
+    "types-PyYAML",
+]
+
+[project.scripts]
+orchestrator = "orchestrator.cli:main"
+orchestrator-cp = "orchestrator.shares.cp:main"
+
+[project.entry-points."orchestrator.runners"]
+claude-code = "orchestrator.agents.runners.claude_code:ClaudeCodeRunner"
+codex = "orchestrator.agents.runners.codex:CodexRunner"
+gemini-cli = "orchestrator.agents.runners.gemini_cli:GeminiCliRunner"
+opencode = "orchestrator.agents.runners.opencode:OpenCodeRunner"
+hermes = "orchestrator.agents.runners.hermes:HermesRunner"
+
+[tool.setuptools.packages.find]
+include = ["orchestrator*"]
+
+[tool.setuptools.package-data]
+orchestrator = ["agents/prompts/*.md", "py.typed"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 110
+target-version = "py313"
+extend-exclude = [".mkenv", "python-env-*"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]  # ruff format wraps code; remaining long lines are string literals
+
+[tool.ruff.lint.per-file-ignores]
+"orchestrator/cli.py" = ["B008"]  # typer declares options in defaults by design
+
+[tool.mypy]
+python_version = "3.13"
+ignore_missing_imports = true
+check_untyped_defs = true
+exclude = ["\\.mkenv", "python-env-.*", "tests"]

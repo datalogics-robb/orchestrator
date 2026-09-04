@@ -1,7 +1,7 @@
 # Agent Orchestrator: Design Plan
 
-Status: draft v3, 2026-09-03 (v2 added per-role agent runtimes; v3 adds network-share
-copies and pass-through of existing MCP servers). Produced from a design interview; decisions recorded in
+Status: v3, 2026-09-03 (v2 added per-role agent runtimes; v3 added network-share copies
+and pass-through of existing MCP servers). Implemented in this repository; see README.md. Produced from a design interview; decisions recorded in
 section 2 are settled unless marked as open.
 
 ## 1. Purpose
@@ -366,7 +366,7 @@ confluence:
   publish:
     space: ENG
     parent_page_id: 789
-    on: [blocked, completed]          # which outcomes get a page
+    when: [blocked, completed]        # which outcomes get a page (`on` is a YAML boolean)
 
 repo:
   github: datalogics/apdfl
@@ -699,11 +699,14 @@ from any environment belonging to a target project, and the two never mix.
 
 - **Orchestrator venv.** `python mkenv.py` in the repo root clones the mkenv implementation
   into `.mkenv/`, creates `python-env-<hostname>/`, installs pip-tools from Artifactory,
-  compiles `requirements.in` to a lock file, and syncs it. The package is installed into
-  that venv in editable mode (`pip install -e .`, added to the mkenv post-sync step) so the
-  `orchestrator` command is on the venv's `bin`. Both `/.mkenv` and `/python-env-*` are
-  gitignored. Users activate the venv or call `python-env-<hostname>/bin/orchestrator`
-  directly; a wrapper script at the repo root does the latter for convenience.
+  compiles `requirements.in` to a lock file, and syncs it. `requirements.in` lists the
+  runtime and development dependencies directly (mkenv compiles with build isolation off
+  and a fresh 3.13 venv has no setuptools, so an editable `-e .` line cannot resolve there);
+  `pyproject.toml` carries the same list for anyone installing the package with pip. Both
+  `/.mkenv` and `/python-env-*` are gitignored. `bin/orchestrator` runs
+  `python -m orchestrator` with the venv's interpreter and the repo on `PYTHONPATH`, so
+  nothing needs activating; activating the venv and running `python -m orchestrator` works
+  too.
 - **Target project venv, per worktree.** When the target is a Python project, `build.setup`
   runs its own `python mkenv.py` inside the worktree, producing a venv inside that
   worktree. With N parallel worktrees this means N environments and N syncs, so the

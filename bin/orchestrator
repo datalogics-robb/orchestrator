@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Runs the orchestrator from the repo's mkenv virtual environment without activating it.
+set -euo pipefail
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+env_dir="$root/python-env-$(hostname -s | tr '[:upper:]' '[:lower:]')"
+if [[ ! -x "$env_dir/bin/python" ]]; then
+  echo "No virtual environment at $env_dir; run: python mkenv.py" >&2
+  exit 1
+fi
+export PYTHONPATH="$root${PYTHONPATH:+:$PYTHONPATH}"
+exec "$env_dir/bin/python" -m orchestrator "$@"
