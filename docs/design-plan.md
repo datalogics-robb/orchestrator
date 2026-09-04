@@ -600,7 +600,8 @@ process boundary rather than from Claude Code's permission prompts.
 - Agents and build commands run with a constructed environment: `PATH`, `HOME`, locale,
   the single API key named by that role's `auth.token_env` (agents only), declared
   `build.env`, and nothing else. `GITHUB_TOKEN`, `JIRA_*`, `.netrc` contents, other
-  vendors' API keys, and SSH agent sockets are not passed. The worker never sees the
+  vendors' API keys, SSH agent sockets, and the orchestrator's own virtual environment
+  (`VIRTUAL_ENV`, `PYTHON*`, its `bin` on `PATH`) are not passed. The worker never sees the
   reviewer's key and vice versa. Secrets embedded in allowed MCP server definitions are
   the one deliberate exception (section 4.6).
 - File access outside the worktree is limited to the role's share grants. Everything
@@ -672,8 +673,9 @@ process boundary rather than from Claude Code's permission prompts.
 - `orchestrator doctor` checks Python version, `git`, `gh`, the binary, minimum version,
   and auth of every configured adapter, tracker and Confluence auth, GitHub token scope,
   base branch reachability, worktree root writability, and that build commands exist on
-  `PATH`. It also prints each role's runner with the limits it enforces natively versus
-  the ones the orchestrator enforces softly. For shares it checks that each declared
+  `PATH`. It confirms it is running from the orchestrator's own mkenv venv on Python 3.13
+  or later (section 10.1). It also prints each role's runner with the limits it enforces
+  natively versus the ones the orchestrator enforces softly. For shares it checks that each declared
   mount exists on this platform, reads a probe from the source, writes and removes a probe
   under each destination write root, and warns if a read-only share is mounted writable.
   For MCP it parses every source file and confirms each allowlisted server is defined.
@@ -686,9 +688,36 @@ process boundary rather than from Claude Code's permission prompts.
 
 ## 10. Implementation plan
 
-Packaging: `pyproject.toml` with `requires-python = ">=3.13"`, `uv` or `pip` for
-installation, and a `mkenv.py` plus `requirements.in` so it fits the existing development
-directory convention. Console script `orchestrator`.
+Packaging: `pyproject.toml` with `requires-python = ">=3.13"` and a console script
+`orchestrator`. Dependencies are listed in `requirements.in` and compiled by mkenv, so the
+repo follows the same convention as the rest of the development directory.
+
+### 10.1 Environments
+
+The orchestrator has its own Python virtual environment, created by mkenv. It is separate
+from any environment belonging to a target project, and the two never mix.
+
+- **Orchestrator venv.** `python mkenv.py` in the repo root clones the mkenv implementation
+  into `.mkenv/`, creates `python-env-<hostname>/`, installs pip-tools from Artifactory,
+  compiles `requirements.in` to a lock file, and syncs it. The package is installed into
+  that venv in editable mode (`pip install -e .`, added to the mkenv post-sync step) so the
+  `orchestrator` command is on the venv's `bin`. Both `/.mkenv` and `/python-env-*` are
+  gitignored. Users activate the venv or call `python-env-<hostname>/bin/orchestrator`
+  directly; a wrapper script at the repo root does the latter for convenience.
+- **Target project venv, per worktree.** When the target is a Python project, `build.setup`
+  runs its own `python mkenv.py` inside the worktree, producing a venv inside that
+  worktree. With N parallel worktrees this means N environments and N syncs, so the
+  orchestrator sets `PIP_CACHE_DIR` to a shared location under `.orchestrator/cache/`
+  and runs `build.setup` under the build semaphore. For non-Python targets this step is
+  simply absent.
+- **Agents never see the orchestrator's venv.** The scrubbed environment (section 7.2)
+  builds `PATH` from the worktree's own venv `bin` if one exists, then the system paths.
+  The orchestrator's `python-env-*` directory, its `VIRTUAL_ENV`, and any `PYTHON*`
+  variables are removed, so the worker's `python` and `pytest` resolve to the target
+  project's interpreter, never the orchestrator's.
+- **Interpreter requirement.** mkenv uses whichever `python` runs it, so `doctor` checks
+  that the orchestrator is running on 3.13 or later and that `sys.prefix` is inside the
+  repo's `python-env-*` directory, and warns otherwise.
 
 Dependencies (kept small): `typer`, `pydantic>=2`, `pyyaml`, `httpx`, `jinja2`, `rich`,
 `structlog`. GitHub via the `gh` CLI. Jira and Confluence via direct REST with `httpx`
@@ -698,7 +727,7 @@ Milestones:
 
 | # | Milestone | Scope | Exit criterion |
 |---|---|---|---|
-| M0 | Skeleton | Package layout, config schema and loader, secret validation, adapter registry and `Capabilities`, `init`, `doctor`, audit log, SQLite store | `doctor` passes against a real Jira/GitHub setup and reports both configured adapters |
+| M0 | Skeleton | `mkenv.py`, `requirements.in`, `pyproject.toml`, package layout, config schema and loader, secret validation, adapter registry and `Capabilities`, `init`, `doctor`, audit log, SQLite store | `doctor` passes against a real Jira/GitHub setup and reports both configured adapters |
 | M1 | Single issue to branch | Context fetch, worktree, worker agent, share grants and `orchestrator-cp`, MCP pass-through for Claude Code, build, test selection, local commit, findings.md on blocked | One real issue produces a validated local branch or a findings file, `--dry-run` only, including a support-to-raid copy recorded in the audit log |
 | M2 | Review loop | Codex adapter with `read-only` sandbox, `--output-schema`, generated `CODEX_HOME` with allowlisted MCP servers, reviewer prompt, structured verdicts, fix rounds with session resume, PR body generation, push and PR | PR opened end to end with Claude Code as worker and Codex as reviewer, at least one fix round exercised |
 | M3 | Write-back | Jira comments, transitions, attachments; Confluence context fetch and publish | Blocked and completed paths both visible in Jira and Confluence |
