@@ -50,7 +50,13 @@ bin/orchestrator status 20260903-141500-a1b2c3      # one run's tasks
 bin/orchestrator resume 20260903-141500-a1b2c3      # continue an interrupted run
 bin/orchestrator clean --older-than 7d              # remove old run directories and worktrees
 bin/orchestrator conformance codex --role reviewer  # prove an adapter works (spends tokens)
+bin/orchestrator config-reference                   # every accepted YAML key, from the schema
+bin/orchestrator --help                             # the workflow, inputs, outputs, exit codes
 ```
+
+Every command accepts `--help`. `orchestrator --help` explains the workflow and what the tool
+reads and writes; `orchestrator config-reference` documents each configuration key with its
+type, default, and meaning (`--format markdown` for a document, `--section agents` to narrow).
 
 Each run writes to `<state_dir>/runs/<run-id>/`: per-issue prompts, agent transcripts,
 build and test logs, the diff sent for review, the PR body, `findings.md` when blocked,

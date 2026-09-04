@@ -65,6 +65,7 @@ ignore = ["E501"]  # ruff format wraps code; remaining long lines are string lit
 
 [tool.mypy]
 python_version = "3.13"
+plugins = ["pydantic.mypy"]
 ignore_missing_imports = true
 check_untyped_defs = true
 exclude = ["\\.mkenv", "python-env-.*", "tests"]

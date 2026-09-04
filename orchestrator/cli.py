@@ -19,12 +19,59 @@ from orchestrator import __version__
 from orchestrator.config.loader import ConfigError, load_config
 from orchestrator.config.schema import Config
 
+HELP = """\
+Turns Jira issues into reviewed GitHub pull requests using configurable agent runtimes.
+
+**How a run works.** For each issue key you pass, the orchestrator fetches the issue and its
+Confluence context, creates a git worktree on a new branch, hands the work to the configured
+worker agent, builds the project, runs a selected subset of tests, commits, has the configured
+reviewer agent review the change, feeds blocking findings back to the worker for a bounded
+number of fix rounds, pushes, opens a draft pull request, and reports back to Jira and
+Confluence. Work that cannot be completed produces a findings report instead of a PR.
+
+**Inputs.**
+
+- *Issue keys* as positional arguments to `run`: `PROJ-123`. An epic key expands to its
+  children, ordered by their "is blocked by" links.
+- *A YAML config file*, `orchestrator.yaml` in the current directory unless `--config` says
+  otherwise. `init` writes a commented example; `config-reference` lists every accepted key.
+- *Secrets* are never in the file. Each `auth:` block names an environment variable or a
+  `~/.netrc` machine, resolved at startup.
+
+**Outputs.** Each run writes `<state_dir>/runs/<run-id>/` with prompts, agent transcripts,
+build and test logs, the reviewed diff, the PR body, `findings.md` when blocked, and
+`audit.jsonl` recording every external side effect. `status` and `resume` read the SQLite
+checkpoints in `<state_dir>/state.db`.
+
+**Typical session.** `init` → edit the YAML → `doctor` → `run PROJ-123 --dry-run` →
+`run PROJ-123`.
+"""
+
+EPILOG = """\
+Exit codes: 0 success; 1 at least one task blocked or failed, or doctor found problems;
+2 bad arguments or invalid configuration; 130 interrupted (use `resume`).
+
+Every command accepts `--help`. Documentation: README.md and docs/design-plan.md in the repository.
+"""
+
 app = typer.Typer(
     name="orchestrator",
-    help="Turns Jira issues into reviewed GitHub pull requests using configurable agent runtimes.",
+    help=HELP,
+    epilog=EPILOG,
     no_args_is_help=True,
     add_completion=False,
+    rich_markup_mode="markdown",
 )
+
+CONFIG_OPTION = typer.Option(
+    Path("orchestrator.yaml"),
+    "--config",
+    "-c",
+    help="YAML configuration file. See `orchestrator config-reference` for every key.",
+    show_default=True,
+)
+
+KEY_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]*-\d+$")
 console = Console()
 err = Console(stderr=True)
 
@@ -173,8 +220,16 @@ def _root(
 
 
 @app.command()
-def init(path: Path = typer.Argument(DEFAULT_CONFIG, help="Where to write the example config.")) -> None:
-    """Write a commented example configuration."""
+def init(
+    path: Path = typer.Argument(
+        DEFAULT_CONFIG, help="Where to write the example config. Refuses to overwrite an existing file."
+    ),
+) -> None:
+    """Write a commented example configuration to start from.
+
+    The example covers every section: tracker, confluence, repo, shares, mcp, build, test,
+    agents, scheduler, and hooks. Edit it, then run `doctor`.
+    """
     if path.exists():
         err.print(f"[red]{path} already exists[/red]")
         raise typer.Exit(1)
@@ -184,12 +239,18 @@ def init(path: Path = typer.Argument(DEFAULT_CONFIG, help="Where to write the ex
 
 @app.command()
 def doctor(
-    config: Path = typer.Option(DEFAULT_CONFIG, "--config", "-c", help="Config file."),
+    config: Path = CONFIG_OPTION,
     offline: bool = typer.Option(
         False, "--offline", help="Skip Jira, GitHub, and Confluence connectivity checks."
     ),
 ) -> None:
-    """Check the machine, credentials, adapters, shares, and MCP sources."""
+    """Check that everything a run needs is in place.
+
+    Verifies the interpreter and venv, git and gh, that every secret reference resolves,
+    each role's agent CLI (binary, minimum version, which limits it enforces natively),
+    repository paths, build commands, share mounts and write roots, MCP sources, and,
+    unless `--offline`, connectivity to Jira, GitHub, and Confluence. Exit 1 when anything fails.
+    """
     from orchestrator.doctor import doctor_sync
 
     cfg = _load(config)
@@ -292,20 +353,46 @@ async def _run(
 
 @app.command()
 def run(
-    keys: list[str] = typer.Argument(None, help="Jira issue or epic keys."),
-    config: Path = typer.Option(DEFAULT_CONFIG, "--config", "-c"),
-    dry_run: bool = typer.Option(
-        False, "--dry-run", help="Do everything except push, open a PR, or write to Jira/Confluence."
+    keys: list[str] = typer.Argument(
+        None,
+        metavar="KEY...",
+        help="One or more Jira issue or epic keys, e.g. PROJ-123 EPIC-7. Case-insensitive. "
+        "An epic expands to its child issues.",
     ),
-    keep_worktrees: bool = typer.Option(False, "--keep-worktrees", help="Keep worktrees of completed tasks."),
-    max_parallel: int | None = typer.Option(None, "--max-parallel", help="Override scheduler.max_parallel."),
+    config: Path = CONFIG_OPTION,
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Run the agents, build, test, commit, and review locally, but do not push, open a PR, "
+        "or write to Jira or Confluence. Worktrees are kept.",
+    ),
+    keep_worktrees: bool = typer.Option(
+        False,
+        "--keep-worktrees",
+        help="Keep worktrees of completed tasks (blocked and failed ones are always kept).",
+    ),
+    max_parallel: int | None = typer.Option(
+        None, "--max-parallel", min=1, help="Issues processed at once; overrides scheduler.max_parallel."
+    ),
     show_prompt: bool = typer.Option(
-        False, "--show-prompt", help="Fetch context, print the worker prompt, and exit."
+        False,
+        "--show-prompt",
+        help="Fetch the issue and Confluence context, print the rendered worker prompt, and exit without "
+        "creating a worktree or running an agent.",
     ),
 ) -> None:
-    """Process the given issues through to pull requests."""
+    """Process the given issues through to pull requests.
+
+    Progress is shown live, one row per issue. When all tasks finish, a run report is printed
+    and saved under the run directory. Exit 0 only when every task reached DONE; a blocked
+    task leaves a findings.md and exits 1.
+    """
     if not keys:
-        err.print("[red]give at least one issue or epic key[/red]")
+        err.print("[red]give at least one issue or epic key, e.g. PROJ-123[/red]")
+        raise typer.Exit(2)
+    bad = [k for k in keys if not KEY_PATTERN.match(k.upper())]
+    if bad:
+        err.print(f"[red]not Jira keys: {', '.join(bad)}; expected the form PROJ-123[/red]")
         raise typer.Exit(2)
     cfg = _load(config)
     if max_parallel:
@@ -328,11 +415,17 @@ def run(
 
 @app.command()
 def resume(
-    run_id: str = typer.Argument(..., help="Run id from `orchestrator status`."),
-    config: Path = typer.Option(DEFAULT_CONFIG, "--config", "-c"),
-    keep_worktrees: bool = typer.Option(False, "--keep-worktrees"),
+    run_id: str = typer.Argument(
+        ..., help="Run id as shown by `orchestrator status`, e.g. 20260903-141500-a1b2c3."
+    ),
+    config: Path = CONFIG_OPTION,
+    keep_worktrees: bool = typer.Option(False, "--keep-worktrees", help="Keep worktrees of completed tasks."),
 ) -> None:
-    """Continue an interrupted run from each task's last checkpoint."""
+    """Continue an interrupted run from each task's last checkpoint.
+
+    Tasks already DONE, BLOCKED, or FAILED are left alone; the others pick up at the stage
+    they were in. A run started with --dry-run stays a dry run.
+    """
     cfg = _load(config)
     code = asyncio.run(
         _run(
@@ -344,10 +437,12 @@ def resume(
 
 @app.command()
 def status(
-    run_id: str | None = typer.Argument(None, help="Show one run's tasks; omit to list recent runs."),
-    config: Path = typer.Option(DEFAULT_CONFIG, "--config", "-c"),
+    run_id: str | None = typer.Argument(
+        None, help="Show one run's tasks; omit to list the 20 most recent runs."
+    ),
+    config: Path = CONFIG_OPTION,
 ) -> None:
-    """List recent runs or the tasks of one run."""
+    """List recent runs, or the state, rounds, cost, and result of each task in one run."""
     from orchestrator.state.store import Store
 
     cfg = _load(config)
@@ -378,11 +473,17 @@ def _parse_age(text: str) -> timedelta:
 
 @app.command()
 def clean(
-    older_than: str = typer.Option("7d", "--older-than", help="Age threshold, e.g. 7d, 12h."),
-    config: Path = typer.Option(DEFAULT_CONFIG, "--config", "-c"),
+    older_than: str = typer.Option(
+        "7d", "--older-than", help="Age threshold: a number followed by d (days), h (hours), or m (minutes)."
+    ),
+    config: Path = CONFIG_OPTION,
     yes: bool = typer.Option(False, "--yes", "-y", help="Do not ask for confirmation."),
 ) -> None:
-    """Remove run directories and worktrees older than the threshold."""
+    """Remove run directories and worktrees older than the threshold.
+
+    Lists what will be removed and asks first unless --yes is given. The SQLite run history
+    is kept.
+    """
     from orchestrator.scm.worktree import WorktreeManager
 
     cfg = _load(config)
@@ -419,13 +520,17 @@ def conformance(
     runner: str = typer.Argument(
         ..., help="Runner name, e.g. claude-code, codex, gemini-cli, opencode, hermes."
     ),
-    config: Path = typer.Option(
-        DEFAULT_CONFIG, "--config", "-c", help="Config whose matching role supplies model, auth, and options."
+    config: Path = CONFIG_OPTION,
+    role: str = typer.Option(
+        "worker", "--role", help="Which role's model, auth, limits, and options to use: worker or reviewer."
     ),
-    role: str = typer.Option("worker", "--role", help="Which role's settings to use: worker or reviewer."),
     keep: bool = typer.Option(False, "--keep", help="Keep the temporary files for inspection."),
 ) -> None:
-    """Drive a real runtime through a canned task to prove the adapter works. Spends tokens."""
+    """Drive a real agent runtime through a canned task to prove its adapter works. Spends tokens.
+
+    The task reads a file, edits it, returns JSON matching a small schema, and resumes once
+    when the adapter claims session resume. Each step is reported as pass or fail.
+    """
     from orchestrator.agents.conformance.kit import run_conformance
     from orchestrator.agents.registry import get_runner
     from orchestrator.config.loader import resolve_secret
@@ -450,9 +555,52 @@ def conformance(
     raise typer.Exit(0 if report.ok() else 1)
 
 
+@app.command("config-reference")
+def config_reference(
+    fmt: str = typer.Option(
+        "table", "--format", help="table for the terminal, markdown for a document.", show_default=True
+    ),
+    section: str | None = typer.Option(
+        None, "--section", help="Only keys under this top-level section, e.g. agents or shares."
+    ),
+) -> None:
+    """Document every key the YAML configuration accepts, with type, default, and meaning.
+
+    Generated from the schema, so it is always in step with what the loader validates.
+    """
+    from orchestrator.config.reference import as_markdown, as_text
+
+    if fmt == "markdown":
+        text = as_markdown()
+        if section:
+            text = "\n".join(
+                line
+                for line in text.splitlines()
+                if not line.startswith("| `") or line.startswith(f"| `{section}")
+            )
+        console.print(text, markup=False, highlight=False)
+        return
+    if fmt != "table":
+        raise typer.BadParameter("--format must be table or markdown")
+    table = Table(title="configuration keys", show_lines=False)
+    table.add_column("key", no_wrap=True)
+    table.add_column("type")
+    table.add_column("default")
+    table.add_column("description")
+    for e in as_text():
+        if section and not e.path.split(".")[0] == section:
+            continue
+        key = ("  " * e.depth) + e.path.rsplit(".", 1)[-1]
+        if e.required:
+            key = f"[bold]{key}[/bold]"
+        table.add_row(key, e.type, e.default, e.description)
+    console.print(table)
+    console.print("Bold keys are required. Indentation shows nesting; `<name>` marks a user-chosen key.")
+
+
 def main() -> None:
     try:
-        app()
+        app(prog_name="orchestrator")
     except KeyboardInterrupt:
         err.print("interrupted; use `orchestrator resume <run-id>` to continue")
         sys.exit(130)

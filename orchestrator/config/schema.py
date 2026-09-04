@@ -1,7 +1,8 @@
 """Pydantic models for the orchestrator YAML configuration.
 
 Unknown keys are errors everywhere so typos surface immediately. Commands are stored as
-argv lists; a YAML string is split with shlex, a YAML list is taken as-is.
+argv lists; a YAML string is split with shlex, a YAML list is taken as-is. Every field
+carries a description; `orchestrator config-reference` renders them.
 """
 
 from __future__ import annotations
@@ -35,7 +36,12 @@ def _to_argv(value: Any) -> list[str]:
     raise ValueError("a command must be a string or a list of strings")
 
 
-Command = Annotated[list[str], BeforeValidator(_to_argv)]
+Command = Annotated[
+    list[str],
+    BeforeValidator(_to_argv),
+    Field(json_schema_extra={"format": "command"}),
+]
+"""A shell command: either one string (split like a shell would) or a list of arguments."""
 
 
 def _expand(value: Any) -> Any:
@@ -44,7 +50,8 @@ def _expand(value: Any) -> Any:
     return value
 
 
-UserPath = Annotated[Path, BeforeValidator(_expand)]
+UserPath = Annotated[Path, BeforeValidator(_expand), Field(json_schema_extra={"format": "path"})]
+"""A filesystem path; `~` is expanded."""
 
 
 class StrictModel(BaseModel):
@@ -54,8 +61,11 @@ class StrictModel(BaseModel):
 class AuthRef(StrictModel):
     """Names where a secret lives. The secret itself never appears in YAML."""
 
-    netrc_machine: str | None = None
-    token_env: str | None = None
+    netrc_machine: str | None = Field(
+        None,
+        description="Machine name in ~/.netrc whose password is the token (and whose login is the account, for Jira).",
+    )
+    token_env: str | None = Field(None, description="Environment variable holding the token.")
 
     @model_validator(mode="after")
     def _exactly_one(self) -> AuthRef:
@@ -65,21 +75,35 @@ class AuthRef(StrictModel):
 
 
 class Statuses(StrictModel):
-    in_progress: str = "In Progress"
-    in_review: str = "In Review"
-    blocked: str = "Blocked"
+    """Jira status names the orchestrator transitions issues to."""
+
+    in_progress: str = Field("In Progress", description="Status set when work on an issue starts.")
+    in_review: str = Field("In Review", description="Status set after the pull request is opened.")
+    blocked: str = Field("Blocked", description="Status set when the work cannot be completed.")
 
 
 class TrackerConfig(StrictModel):
-    kind: Literal["jira"] = "jira"
-    base_url: str
-    project: str
-    auth: AuthRef
-    statuses: Statuses = Statuses()
-    comment_on: list[Outcome] = ["started", "pr_opened", "blocked", "failed"]
-    acceptance_field: str | None = None
-    epic_children_jql: str = 'parent = "{key}" ORDER BY rank'
-    attachment_max_bytes: int = 10 * 1024 * 1024
+    """The issue tracker that supplies work and receives results."""
+
+    kind: Literal["jira"] = Field("jira", description="Tracker type. Only Jira Cloud is implemented.")
+    base_url: str = Field(description="Jira site URL, e.g. https://example.atlassian.net.")
+    project: str = Field(description="Jira project key the issues belong to.")
+    auth: AuthRef = Field(description="Where the Jira API token lives.")
+    statuses: Statuses = Field(Statuses(), description="Status names used for transitions.")
+    comment_on: list[Outcome] = Field(
+        ["started", "pr_opened", "blocked", "failed"],
+        description="Which events post a comment on the issue.",
+    )
+    acceptance_field: str | None = Field(
+        None, description="Custom field id (e.g. customfield_10042) holding acceptance criteria, if any."
+    )
+    epic_children_jql: str = Field(
+        'parent = "{key}" ORDER BY rank',
+        description="JQL used to list an epic's children; {key} is the epic key.",
+    )
+    attachment_max_bytes: int = Field(
+        10 * 1024 * 1024, description="Attachments larger than this are listed but not downloaded."
+    )
 
     @field_validator("base_url")
     @classmethod
@@ -88,16 +112,27 @@ class TrackerConfig(StrictModel):
 
 
 class ConfluencePublish(StrictModel):
-    space: str
-    parent_page_id: str
-    when: list[Literal["blocked", "completed", "failed"]] = ["blocked", "completed"]
+    """Where run and findings pages are published."""
+
+    space: str = Field(description="Confluence space key.")
+    parent_page_id: str = Field(description="Numeric id of the parent page new pages are created under.")
+    when: list[Literal["blocked", "completed", "failed"]] = Field(
+        ["blocked", "completed"],
+        description="Which task outcomes produce a page. (Named `when` because YAML reads `on` as a boolean.)",
+    )
 
 
 class ConfluenceConfig(StrictModel):
-    base_url: str
-    auth: AuthRef
-    context_pages: list[str] = []
-    publish: ConfluencePublish | None = None
+    """Confluence pages read as context and, optionally, written as reports."""
+
+    base_url: str = Field(description="Confluence site URL, e.g. https://example.atlassian.net/wiki.")
+    auth: AuthRef = Field(description="Where the Confluence API token lives (usually the same as Jira).")
+    context_pages: list[str] = Field(
+        [], description="Page URLs fetched read-only and given to both agents as reference material."
+    )
+    publish: ConfluencePublish | None = Field(
+        None, description="Publishing target; omit to never write pages."
+    )
 
     @field_validator("base_url")
     @classmethod
@@ -106,26 +141,46 @@ class ConfluenceConfig(StrictModel):
 
 
 class PRConfig(StrictModel):
-    draft: bool = True
-    labels: list[str] = ["agent-generated"]
-    reviewers: list[str] = []
-    title_template: str = "{key}: {summary}"
+    """How pull requests are opened."""
+
+    draft: bool = Field(True, description="Open pull requests as drafts.")
+    labels: list[str] = Field(["agent-generated"], description="Labels added to every pull request.")
+    reviewers: list[str] = Field([], description="GitHub logins requested as reviewers.")
+    title_template: str = Field(
+        "{key}: {summary}", description="Pull request title; {key} and {summary} come from the issue."
+    )
 
 
 class RepoConfig(StrictModel):
-    github: str = Field(pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
-    base_branch: str = "main"
-    clone_path: UserPath
-    worktree_root: UserPath
-    branch_template: str = "agent/{key}-{slug}"
-    pr: PRConfig = PRConfig()
-    auth: AuthRef
+    """The GitHub repository being worked on."""
+
+    github: str = Field(pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", description="Repository as owner/name.")
+    base_branch: str = Field("main", description="Branch that worktrees start from and PRs target.")
+    clone_path: UserPath = Field(description="An existing local clone; worktrees are created from it.")
+    worktree_root: UserPath = Field(description="Directory that receives one worktree per issue.")
+    branch_template: str = Field(
+        "agent/{key}-{slug}",
+        description="Branch name; {key} is the lower-cased issue key, {slug} the summary.",
+    )
+    pr: PRConfig = Field(PRConfig(), description="Pull request settings.")
+    auth: AuthRef = Field(
+        description="Where the GitHub token lives. Used only by the orchestrator, never by agents."
+    )
 
 
 class ShareConfig(StrictModel):
-    paths: dict[Platform, UserPath]
-    expect_read_only_mount: bool = False
-    write_under: list[str] = []
+    """A network share agents may read from or write to."""
+
+    paths: dict[Platform, UserPath] = Field(
+        description="Mount path per platform, e.g. {darwin: /Volumes/support, linux: /support}."
+    )
+    expect_read_only_mount: bool = Field(
+        False, description="doctor warns when this share is mounted writable."
+    )
+    write_under: list[str] = Field(
+        [],
+        description="Relative subdirectories where read-write grants may write. Empty allows the whole share.",
+    )
 
     def path_for(self, platform: str = sys.platform) -> Path | None:
         key: Platform | None
@@ -154,80 +209,151 @@ def _normalize_deny(value: Any) -> dict[str, list[str]]:
 
 
 class MCPConfig(StrictModel):
-    sources: dict[str, list[UserPath]] = {}
-    deny_tools: Annotated[dict[str, list[str]], BeforeValidator(_normalize_deny)] = {}
+    """Pass-through of MCP servers already configured for each agent CLI."""
+
+    sources: dict[str, list[UserPath]] = Field(
+        {},
+        description=(
+            "Per runner name, the config files to read MCP definitions from. Defaults: claude-code "
+            "~/.claude.json and .mcp.json; codex ~/.codex/config.toml; gemini-cli ~/.gemini/settings.json; "
+            "opencode ~/.config/opencode/opencode.json; hermes ~/.hermes/config.yaml."
+        ),
+    )
+    deny_tools: Annotated[dict[str, list[str]], BeforeValidator(_normalize_deny)] = Field(
+        {}, description="Per server, tool names kept off even when the server is allowed."
+    )
 
 
 class BuildConfig(StrictModel):
-    setup: list[Command] = []
-    commands: list[Command] = []
-    timeout_minutes: int = 60
-    env: dict[str, str] = {}
-    max_concurrent_builds: int = 1
+    """How the target project is built."""
+
+    setup: list[Command] = Field([], description="Commands run once per new worktree, e.g. python mkenv.py.")
+    commands: list[Command] = Field(
+        [], description="Build commands run after the worker finishes and after each fix."
+    )
+    timeout_minutes: int = Field(60, description="Wall-clock limit for each setup or build command.")
+    env: dict[str, str] = Field(
+        {}, description="Extra environment variables for build, test, and agent processes."
+    )
+    max_concurrent_builds: int = Field(1, description="Global cap on simultaneous builds across all tasks.")
 
 
 class TestSelection(StrictModel):
-    strategy: Literal["changed-paths", "named-suite", "agent-chosen"] = "named-suite"
-    map: dict[str, list[Command]] = {}
-    fallback: list[Command] = []
-    commands: list[Command] = []
-    allowed_prefixes: list[str] = []
-    max_commands: int = 3
+    """Which subset of tests runs after a build."""
+
+    strategy: Literal["changed-paths", "named-suite", "agent-chosen"] = Field(
+        "named-suite",
+        description=(
+            "changed-paths: pick from `map` by changed file prefixes; named-suite: always run `commands`; "
+            "agent-chosen: run the worker's tests_selected, filtered by allowed_prefixes."
+        ),
+    )
+    map: dict[str, list[Command]] = Field({}, description="changed-paths: path prefix to test commands.")
+    fallback: list[Command] = Field([], description="Commands run when the strategy selects nothing.")
+    commands: list[Command] = Field([], description="named-suite: the commands to run.")
+    allowed_prefixes: list[str] = Field(
+        [], description="agent-chosen: a worker-selected command must start with one of these."
+    )
+    max_commands: int = Field(3, description="Upper bound on test commands per round.")
 
 
 class TestConfig(StrictModel):
-    timeout_minutes: int = 30
-    selection: TestSelection = TestSelection()
-    full_suite: list[Command] = []
+    """Test settings."""
+
+    timeout_minutes: int = Field(30, description="Wall-clock limit for each test command.")
+    selection: TestSelection = Field(TestSelection(), description="Test selection strategy.")
+    full_suite: list[Command] = Field(
+        [], description="The complete suite. Never run by the orchestrator; documented in the PR body."
+    )
 
 
 class RoleConfig(StrictModel):
-    runner: str
-    model: str | None = None
-    access: WorktreeAccess = "workspace-write"
-    timeout_minutes: int = 60
-    max_turns: int | None = None
-    max_budget_usd: float | None = None
-    auth: AuthRef
-    shares: dict[str, ShareMode] = {}
-    mcp_servers: list[str] = []
-    options: dict[str, Any] = {}
+    """Settings for one agent role (worker or reviewer)."""
+
+    runner: str = Field(
+        description="Adapter name: claude-code, codex, gemini-cli, opencode, hermes, or a registered third-party adapter."
+    )
+    model: str | None = Field(None, description="Model passed to the runtime; omit for its default.")
+    access: WorktreeAccess = Field(
+        "workspace-write",
+        description="workspace-write lets the role edit the worktree; read-only forbids writes.",
+    )
+    timeout_minutes: int = Field(
+        60, description="Wall-clock limit per agent invocation, enforced by the orchestrator."
+    )
+    max_turns: int | None = Field(
+        None, description="Turn limit; passed to runtimes that support it, otherwise soft."
+    )
+    max_budget_usd: float | None = Field(
+        None, description="Spend limit; passed to runtimes that support it, otherwise checked after the run."
+    )
+    auth: AuthRef = Field(
+        description="Where this role's API key lives. It is the only secret the agent process sees."
+    )
+    shares: dict[str, ShareMode] = Field(
+        {}, description="Share name to read or read-write. read-write requires access: workspace-write."
+    )
+    mcp_servers: list[str] = Field([], description="MCP server names this role may use, from mcp.sources.")
+    options: dict[str, Any] = Field(
+        {},
+        description=(
+            "Adapter-specific settings. claude-code: effort, bare. codex: reasoning_effort. "
+            "opencode: agent, variant. hermes: provider, reasoning."
+        ),
+    )
 
 
 class AgentsConfig(StrictModel):
-    review_rounds: int = 2
-    prompt_overrides: dict[str, UserPath] = {}
-    worker: RoleConfig
-    reviewer: RoleConfig
+    """Agent roles and the review loop."""
+
+    review_rounds: int = Field(
+        2,
+        description="Fix rounds allowed before the task is blocked; build, test, and review failures all count.",
+    )
+    prompt_overrides: dict[str, UserPath] = Field(
+        {}, description="Replace a built-in prompt template (worker, reviewer, fixer) with a file."
+    )
+    worker: RoleConfig = Field(description="The agent that implements the change.")
+    reviewer: RoleConfig = Field(description="The agent that reviews the change; ideally a different vendor.")
 
     def role(self, name: Role) -> RoleConfig:
         return self.worker if name == "worker" else self.reviewer
 
 
 class SchedulerConfig(StrictModel):
-    max_parallel: int = 3
-    retry_infra_failures: int = 2
+    """Concurrency and retries."""
+
+    max_parallel: int = Field(3, description="Issues processed at the same time.")
+    retry_infra_failures: int = Field(
+        2, description="Retries for transient infrastructure errors such as git or network failures."
+    )
 
 
 class HooksConfig(StrictModel):
-    after_worktree: list[Command] = []
-    before_pr: list[Command] = []
+    """Shell hooks run by the orchestrator at fixed points."""
+
+    after_worktree: list[Command] = Field([], description="Run in each new worktree after build.setup.")
+    before_pr: list[Command] = Field([], description="Run in the worktree before pushing.")
 
 
 class Config(StrictModel):
-    version: Literal[1]
-    state_dir: UserPath | None = None
-    """Where runs, cache, and the SQLite store live. Defaults to the worktree root's parent."""
-    tracker: TrackerConfig
-    confluence: ConfluenceConfig | None = None
-    repo: RepoConfig
-    shares: dict[str, ShareConfig] = {}
-    mcp: MCPConfig = MCPConfig()
-    build: BuildConfig = BuildConfig()
-    test: TestConfig = TestConfig()
-    agents: AgentsConfig
-    scheduler: SchedulerConfig = SchedulerConfig()
-    hooks: HooksConfig = HooksConfig()
+    """Top-level configuration: one file per target repository."""
+
+    version: Literal[1] = Field(description="Config format version. Must be 1.")
+    state_dir: UserPath | None = Field(
+        None,
+        description="Where runs, cache, and the SQLite store live. Defaults to the worktree root's parent.",
+    )
+    tracker: TrackerConfig = Field(description="Issue tracker settings.")
+    confluence: ConfluenceConfig | None = Field(None, description="Confluence settings; omit to disable.")
+    repo: RepoConfig = Field(description="Target repository settings.")
+    shares: dict[str, ShareConfig] = Field({}, description="Network shares, by name.")
+    mcp: MCPConfig = Field(MCPConfig(), description="MCP server pass-through settings.")
+    build: BuildConfig = Field(BuildConfig(), description="Build settings.")
+    test: TestConfig = Field(TestConfig(), description="Test settings.")
+    agents: AgentsConfig = Field(description="Agent roles.")
+    scheduler: SchedulerConfig = Field(SchedulerConfig(), description="Concurrency and retries.")
+    hooks: HooksConfig = Field(HooksConfig(), description="Shell hooks.")
 
     @model_validator(mode="after")
     def _cross_checks(self) -> Config:
