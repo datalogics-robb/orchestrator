@@ -2,6 +2,7 @@
 /python-env-*
 /.orchestrator
 __pycache__/
+requirements.txt
 *.pyc
 *.egg-info/
 /build/

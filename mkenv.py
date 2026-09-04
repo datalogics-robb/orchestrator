@@ -4,9 +4,11 @@ import os
 import subprocess
 import sys
 
-# The orchestrator requires Python 3.13 or newer.
-if sys.version_info[:2] < (3, 13):
-    raise SystemError('Only Python 3.13+ is allowed')
+# Requires at least Python 3.7. If placing this into a project that
+# requires a newer Python, you may elect to increase the version
+# requirement below.
+if sys.version_info[:2] < (3, 7):
+    raise SystemError('Only Python 3.7+ is allowed')
 
 MKENV_IMPL = 'mkenv_impl'
 HERE = os.path.dirname(os.path.abspath(__file__))
