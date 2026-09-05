@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 Severity = Literal["blocking", "major", "minor", "nit"]
 BlockReason = Literal["ambiguous-requirements", "missing-access", "out-of-scope", "technical"]
@@ -39,9 +39,16 @@ class Finding(Contract):
     severity: Severity
     path: str | None = None
     line: int | None = None
-    title: str
+    title: str = ""
     detail: str = ""
     suggested_fix: str = ""
+
+    @model_validator(mode="after")
+    def _title_from_detail(self) -> Finding:
+        if not self.title:
+            text = self.detail.strip() or self.suggested_fix.strip() or "finding"
+            object.__setattr__(self, "title", text.split(". ")[0][:120])
+        return self
 
 
 class ReviewerResult(Contract):

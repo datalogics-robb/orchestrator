@@ -132,22 +132,16 @@ class CodexRunner:
         sandbox = "read-only" if request.access.worktree == "read-only" else "workspace-write"
         argv = ["codex", "exec"]
         if request.session:
-            argv += ["resume", request.session]
-        argv += [
-            "--cd",
-            str(request.cwd),
-            "--json",
-            "--output-last-message",
-            str(request.run_dir / "last-message.txt"),
-        ]
-        if not request.session:
-            argv += ["--sandbox", sandbox, "--output-schema", str(schema_path)]
+            # `resume` takes no --cd, --sandbox, or --add-dir; cwd comes from the process and
+            # the sandbox from a config override. The session already carries the schema.
+            argv += ["resume", request.session, "-c", f"sandbox_mode={json.dumps(sandbox)}"]
+        else:
+            argv += ["--cd", str(request.cwd), "--sandbox", sandbox, "--output-schema", str(schema_path)]
             if request.role == "reviewer":
                 argv.append("--ephemeral")
             for p in request.access.writable_paths:
                 argv += ["--add-dir", str(p)]
-        else:
-            argv += ["-c", f"sandbox_mode={json.dumps(sandbox)}"]
+        argv += ["--json", "--output-last-message", str(request.run_dir / "last-message.txt")]
         if request.model:
             argv += ["--model", request.model]
         effort = request.options.get("reasoning_effort")

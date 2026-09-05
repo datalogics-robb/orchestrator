@@ -102,6 +102,8 @@ def test_codex_worker_gets_writable_shares_and_resume(tmp_path: Path) -> None:
     req.session = "thread-1"
     argv = CodexRunner().argv(req, home)
     assert argv[:4] == ["codex", "exec", "resume", "thread-1"]
+    assert "--cd" not in argv and "--sandbox" not in argv and "--json" in argv
+    assert argv[argv.index("-c") + 1] == 'sandbox_mode="workspace-write"'
 
 
 def test_codex_event_parsing() -> None:
