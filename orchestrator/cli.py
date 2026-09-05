@@ -321,7 +321,8 @@ async def _run(
                     rt.store.save_task(resume_id, t)
         dry_run = dry_run or row.dry_run
         rt.dry_run = dry_run
-    rt.store.create_run(rt.run_id, config, keys, dry_run)
+    if not resume_id:
+        rt.store.create_run(rt.run_id, config, keys, dry_run)
     console.print(f"run [bold]{rt.run_id}[/bold] -> {rt.run_dir}" + (" (dry run)" if dry_run else ""))
     try:
         specs = await ExplicitKeys(rt.tracker, keys).tasks()
