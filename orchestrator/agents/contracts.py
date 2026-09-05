@@ -76,6 +76,34 @@ def _schema(model: type[BaseModel]) -> dict[str, Any]:
     return resolve(schema)
 
 
+def strict_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """The subset of JSON Schema OpenAI's structured outputs accept.
+
+    Every object gets additionalProperties: false and lists all properties as required;
+    default, title, and format annotations are dropped; const becomes a one-value enum.
+    """
+
+    def walk(node: Any) -> Any:
+        if isinstance(node, list):
+            return [walk(n) for n in node]
+        if not isinstance(node, dict):
+            return node
+        out: dict[str, Any] = {}
+        for k, v in node.items():
+            if k in ("default", "title", "format"):
+                continue
+            if k == "const":
+                out["enum"] = [v]
+                continue
+            out[k] = walk(v)
+        if out.get("type") == "object" and isinstance(out.get("properties"), dict):
+            out["additionalProperties"] = False
+            out["required"] = list(out["properties"])
+        return out
+
+    return walk(schema)
+
+
 WORKER_SCHEMA: dict[str, Any] = _schema(WorkerResult)
 REVIEWER_SCHEMA: dict[str, Any] = _schema(ReviewerResult)
 

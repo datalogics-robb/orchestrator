@@ -18,6 +18,7 @@ from orchestrator.agents.base import (
     run_process,
     tail,
 )
+from orchestrator.agents.contracts import strict_schema
 from orchestrator.agents.runners import common
 from orchestrator.config.schema import RoleConfig
 
@@ -127,7 +128,7 @@ class CodexRunner:
 
     def argv(self, request: AgentRequest, home: Path) -> list[str]:
         schema_path = home / "schema.json"
-        schema_path.write_text(json.dumps(request.schema))
+        schema_path.write_text(json.dumps(strict_schema(request.schema)))
         sandbox = "read-only" if request.access.worktree == "read-only" else "workspace-write"
         argv = ["codex", "exec"]
         if request.session:

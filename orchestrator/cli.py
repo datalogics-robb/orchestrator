@@ -290,6 +290,8 @@ async def _run(
     keep_worktrees: bool,
     resume_id: str | None,
     show_prompt: bool,
+    retry_failed: bool = False,
+    only: list[str] | None = None,
 ) -> int:
     from orchestrator.intake.base import ExplicitKeys
     from orchestrator.pipeline.runtime import build_runtime
@@ -305,6 +307,18 @@ async def _run(
             return 2
         keys = keys or row.keys
         existing = rt.store.load_tasks(resume_id)
+        if only:
+            keys = [k for k in keys if k in only]
+            existing = {k: t for k, t in existing.items() if k in only}
+        if retry_failed:
+            from orchestrator.pipeline.task import TERMINAL
+
+            for t in existing.values():
+                if t.state == "FAILED":
+                    previous = [s for _, s in t.history if s not in TERMINAL]
+                    t.outcome, t.error = "", None
+                    t.transition(previous[-1] if previous else "CONTEXT")  # type: ignore[arg-type]
+                    rt.store.save_task(resume_id, t)
         dry_run = dry_run or row.dry_run
         rt.dry_run = dry_run
     rt.store.create_run(rt.run_id, config, keys, dry_run)
@@ -420,16 +434,33 @@ def resume(
     ),
     config: Path = CONFIG_OPTION,
     keep_worktrees: bool = typer.Option(False, "--keep-worktrees", help="Keep worktrees of completed tasks."),
+    retry_failed: bool = typer.Option(
+        False,
+        "--retry-failed",
+        help="Also re-run FAILED tasks, from the stage they failed in (an orchestrator fix has been applied).",
+    ),
+    only: list[str] = typer.Option(
+        None, "--only", help="Restrict to these issue keys; repeatable. Others in the run are untouched."
+    ),
 ) -> None:
     """Continue an interrupted run from each task's last checkpoint.
 
-    Tasks already DONE, BLOCKED, or FAILED are left alone; the others pick up at the stage
-    they were in. A run started with --dry-run stays a dry run.
+    Tasks already DONE or BLOCKED are left alone; the others pick up at the stage they were
+    in. FAILED tasks are also left alone unless --retry-failed is given. A run started with
+    --dry-run stays a dry run.
     """
     cfg = _load(config)
     code = asyncio.run(
         _run(
-            cfg, config, [], dry_run=False, keep_worktrees=keep_worktrees, resume_id=run_id, show_prompt=False
+            cfg,
+            config,
+            [],
+            dry_run=False,
+            keep_worktrees=keep_worktrees,
+            resume_id=run_id,
+            show_prompt=False,
+            retry_failed=retry_failed,
+            only=[k.upper() for k in only] if only else None,
         )
     )
     raise typer.Exit(code)
