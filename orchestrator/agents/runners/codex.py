@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -94,11 +96,26 @@ class CodexRunner:
 
     def preflight(self, role: RoleConfig) -> list[Problem]:
         problems = common.binary_problems("codex", MIN_VERSION, role)
+        if (
+            role.auth.use_cli_login
+            and not (Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")) / "auth.json").exists()
+        ):
+            problems.append(Problem("error", "codex: use_cli_login set but no auth.json; run `codex login`"))
         problems += common.soft_limit_warnings(role, turn_cap=False, budget_cap=False)
         return problems
 
-    async def _ensure_login(self, home: Path, env: dict[str, str], api_key: str | None) -> None:
-        if (home / "auth.json").exists() or not api_key:
+    async def _ensure_login(
+        self, home: Path, env: dict[str, str], api_key: str | None, cli_login: bool = False
+    ) -> None:
+        if (home / "auth.json").exists():
+            return
+        if cli_login:
+            source = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")) / "auth.json"
+            if not source.exists():
+                raise RuntimeError(f"codex: use_cli_login set but {source} does not exist; run `codex login`")
+            shutil.copy2(source, home / "auth.json")
+            return
+        if not api_key:
             return
         await run_process(
             ["codex", "login", "--with-api-key"],
@@ -148,7 +165,7 @@ class CodexRunner:
         )
         env = dict(request.env)
         env["CODEX_HOME"] = str(home)
-        await self._ensure_login(home, env, env.get("OPENAI_API_KEY"))
+        await self._ensure_login(home, env, env.get("OPENAI_API_KEY"), request.cli_login)
         argv = self.argv(request, home)
         (request.run_dir / "argv.json").write_text(json.dumps(argv, indent=2))
         prompt = request.prompt

@@ -5,6 +5,7 @@ from __future__ import annotations
 import netrc
 import os
 import re
+import subprocess
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -86,9 +87,25 @@ def load_config(path: Path) -> Config:
         raise ConfigError("\n".join(lines)) from e
 
 
-def resolve_secret(ref: AuthRef, *, env: Mapping[str, str] | None = None) -> str:
+GH_TOKEN_COMMAND = ["gh", "auth", "token"]
+
+
+def resolve_secret(
+    ref: AuthRef, *, env: Mapping[str, str] | None = None, cli_command: list[str] | None = None
+) -> str:
     """Resolve an AuthRef to its secret value from the environment or ~/.netrc."""
     source: Mapping[str, str] = os.environ if env is None else env
+    if ref.use_cli_login:
+        if cli_command is None:
+            raise SecretError("use_cli_login is not supported for this credential")
+        try:
+            out = subprocess.run(cli_command, capture_output=True, text=True, timeout=30, check=True)
+        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+            raise SecretError(f"{' '.join(cli_command)} failed: {e}") from e
+        token = out.stdout.strip()
+        if not token:
+            raise SecretError(f"{' '.join(cli_command)} returned nothing")
+        return token
     if ref.token_env:
         value = source.get(ref.token_env)
         if not value:

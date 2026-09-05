@@ -589,6 +589,11 @@ process boundary rather than from Claude Code's permission prompts.
 
 - Secrets are resolved at startup from env vars or `.netrc` into memory and are never
   written to disk, logs, or prompts. Log formatter redacts any resolved secret value.
+- A third form, `use_cli_login: true`, reuses a tool's own stored login instead of a token:
+  `gh auth token` for GitHub, the Claude Code subscription login for the `claude-code`
+  runner, and the Codex ChatGPT login (its `auth.json`, copied into the per-run home) for
+  `codex`. It exists because developers commonly hold subscriptions rather than API keys.
+  It is not valid for Jira or Confluence, which always use a token.
 - Only the orchestrator process talks to Jira, Confluence, and GitHub APIs. Agents get
   files, not tokens.
 - The GitHub token needs `repo` scope only; recommend a fine-grained token limited to
@@ -611,7 +616,12 @@ process boundary rather than from Claude Code's permission prompts.
 - Each agent process gets its own config directory under the run directory
   (`CLAUDE_CONFIG_DIR` for Claude Code, `CODEX_HOME` for Codex, the equivalents listed in
   Appendix B for the others), so session transcripts and state never mix with the
-  developer's global setup. Every adapter also passes its "ignore user config" flag
+  developer's global setup. One exception, verified on 2026-09-05: the Claude Code
+  subscription login is bound to the default config directory (an isolated directory
+  reports "not logged in" even with the account record copied), so with `use_cli_login`
+  the Claude adapter runs from the default directory and drops `--bare`. Strict MCP
+  config, the per-run hook settings, and tool denial still apply; the developer's own
+  hooks, CLAUDE.md, and skills are also loaded in that mode. Every adapter also passes its "ignore user config" flag
   (`--bare`, `--ignore-user-config`, `--pure`, and so on) so the developer's hooks,
   plugins, MCP servers, and stored credentials are not loaded. Authentication is then
   strictly the one API key in the scrubbed environment. Context the agent needs

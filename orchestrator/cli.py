@@ -539,11 +539,13 @@ def conformance(
     role_cfg = cfg.agents.role(role)  # type: ignore[arg-type]
     if role_cfg.runner != runner:
         role_cfg = role_cfg.model_copy(update={"runner": runner})
-    try:
-        api_key = resolve_secret(role_cfg.auth)
-    except Exception as e:  # noqa: BLE001
-        err.print(f"[red]{e}[/red]")
-        raise typer.Exit(2) from None
+    api_key = ""
+    if not role_cfg.auth.use_cli_login:
+        try:
+            api_key = resolve_secret(role_cfg.auth)
+        except Exception as e:  # noqa: BLE001
+            err.print(f"[red]{e}[/red]")
+            raise typer.Exit(2) from None
     report = asyncio.run(run_conformance(get_runner(runner), role_cfg, api_key, keep=keep))
     table = Table(title=f"conformance: {runner}")
     table.add_column("step")

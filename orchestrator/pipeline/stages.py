@@ -123,6 +123,7 @@ async def _run_agent(
         deny_tools=rr.deny_tools,
         options=dict(rc.options),
         prompt_and_parse=not rr.runner.capabilities.structured_output,
+        cli_login=rr.cli_login,
     )
     rt.audit.record("agent_start", task.key, role=role, runner=rr.runner.name, label=label, model=rc.model)
     result = await rr.runner.run(request)
@@ -269,7 +270,7 @@ async def stage_worktree(rt: Runtime, spec: TaskSpec, task: TaskState) -> State:
     dst = _context_dir(wt)
     if src.exists():
         shutil.copytree(src, dst, dirs_exist_ok=True)
-    env = _build_env(rt, task, wt.path)
+    env = lambda: _build_env(rt, task, wt.path)  # noqa: E731 - venv appears after setup
     if rt.cfg.build.setup:
         step = await run_step(
             "setup",

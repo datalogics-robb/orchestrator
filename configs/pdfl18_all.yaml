@@ -1,0 +1,95 @@
+# Orchestrator configuration for datalogics/pdfl18_all (Adobe PDF Library).
+# Secrets come from ~/.netrc and the gh / claude / codex logins; nothing sensitive lives here.
+version: 1
+state_dir: ~/development/.orchestrator
+
+tracker:
+  kind: jira
+  base_url: https://datalogics-jira.atlassian.net
+  project: APDFL                         # doctor checks this project; issues from any project may be run
+  auth:
+    netrc_machine: datalogics-jira.atlassian.net
+  statuses:
+    in_progress: "In Progress"
+    in_review: "Review"                  # exists in the APDFL workflow only; elsewhere the transition is skipped with a note
+    blocked: ""                          # no Blocked state in these workflows: comment and attach findings only
+  comment_on: [started, pr_opened, blocked, failed]
+  attachment_max_bytes: 26214400
+
+repo:
+  github: datalogics/pdfl18_all
+  base_branch: develop-21
+  clone_path: ~/development/.orchestrator/clones/pdfl18_all
+  worktree_root: ~/development/.orchestrator/worktrees
+  branch_template: "agent/{key}-{slug}"
+  pr:
+    draft: true
+    labels: []
+    reviewers: []
+    title_template: "{key}: {summary}"
+  auth:
+    use_cli_login: true                  # token from `gh auth token`; used only by the orchestrator
+
+shares:
+  support:
+    paths: {darwin: /Volumes/support, linux: /support}
+  raid:
+    paths: {darwin: /Volumes/raid, linux: /raid}
+    write_under:
+      - development/Internal_Use/Testing/APDFL
+
+mcp:
+  deny_tools:
+    mcp-jenkins: [triggerBuild, rebuildBuild, replayBuild, updateBuild]
+
+build:
+  setup:
+    - python3 mkenv.py                   # creates the worktree's own venv with invoke, conan, cmake
+    - invoke -e bootstrap -u --config=Release
+  commands:
+    - invoke -e build --config=Release
+  timeout_minutes: 180
+  max_concurrent_builds: 1
+
+test:
+  timeout_minutes: 90
+  selection:
+    strategy: agent-chosen               # the worker names the DevTest(s) it created, e.g. --tests=SF40586
+    allowed_prefixes:
+      - invoke -e test --config=Release
+    fallback: []
+    max_commands: 3
+  full_suite:
+    - invoke -e test --config=Release
+
+agents:
+  review_rounds: 2
+  worker:
+    runner: claude-code
+    access: workspace-write
+    timeout_minutes: 240
+    max_turns: 400
+    auth:
+      use_cli_login: true                # Claude Code subscription login
+    shares:
+      support: read
+      raid: read-write
+    mcp_servers: [ragflow]               # PDF specification search
+    options:
+      effort: high
+  reviewer:
+    runner: codex
+    access: read-only
+    timeout_minutes: 60
+    auth:
+      use_cli_login: true                # Codex ChatGPT login, copied into the per-run home
+    shares:
+      support: read
+      raid: read
+    mcp_servers: [ragflow]
+    options:
+      reasoning_effort: high
+
+scheduler:
+  max_parallel: 2
+  retry_infra_failures: 2

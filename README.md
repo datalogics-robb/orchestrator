@@ -68,8 +68,12 @@ One YAML file per target repository; `orchestrator init` writes a commented exam
 Points worth knowing:
 
 - **Secrets never live in the file.** `auth:` blocks name an environment variable
-  (`token_env`) or a `~/.netrc` machine (`netrc_machine`). The loader refuses files
-  containing anything shaped like a token.
+  (`token_env`), a `~/.netrc` machine (`netrc_machine`), or `use_cli_login: true` to reuse a
+  tool's own login: `gh auth token` for GitHub, the Claude Code subscription login for
+  `claude-code`, and the Codex ChatGPT login for `codex`. With a CLI login, Claude Code runs
+  from its default config directory rather than an isolated one; MCP servers, hooks, and
+  tool denials still apply per run. The loader refuses files containing anything shaped like
+  a token.
 - **Agents are chosen per role.** `agents.worker` and `agents.reviewer` each pick a
   `runner` (`claude-code`, `codex`, `gemini-cli`, `opencode`, `hermes`, or a third-party
   adapter registered under the `orchestrator.runners` entry-point group), a model, limits,

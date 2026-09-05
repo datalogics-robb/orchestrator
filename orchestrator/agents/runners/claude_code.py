@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -38,6 +39,14 @@ class ClaudeCodeRunner:
 
     def preflight(self, role: RoleConfig) -> list[Problem]:
         problems = common.binary_problems("claude", MIN_VERSION, role)
+        if role.auth.use_cli_login:
+            problems.append(
+                Problem(
+                    "warning",
+                    "claude-code: using the Claude Code login from the default config dir; per-run config-dir "
+                    "isolation is off (MCP servers, hooks, and tools are still restricted per run)",
+                )
+            )
         if role.auth.token_env and role.auth.token_env != "ANTHROPIC_API_KEY":
             problems.append(
                 Problem(
@@ -83,7 +92,7 @@ class ClaudeCodeRunner:
         schema_path = home / "schema.json"
         schema_path.write_text(json.dumps(request.schema))
         argv = ["claude", "-p", "--output-format", "json"]
-        if request.options.get("bare", True):
+        if request.options.get("bare", True) and not request.cli_login:
             argv.append("--bare")
         argv += ["--json-schema", json.dumps(request.schema)]
         argv += ["--permission-mode", "bypassPermissions", "--settings", str(settings)]
@@ -115,7 +124,11 @@ class ClaudeCodeRunner:
     async def run(self, request: AgentRequest) -> AgentResult:
         home = common.config_home(request, "claude-home")
         env = dict(request.env)
-        env["CLAUDE_CONFIG_DIR"] = str(home)
+        if not request.cli_login:
+            env["CLAUDE_CONFIG_DIR"] = str(home)
+        elif "CLAUDE_CONFIG_DIR" in os.environ:
+            # the subscription login lives in the user's config dir; keep pointing at it
+            env["CLAUDE_CONFIG_DIR"] = os.environ["CLAUDE_CONFIG_DIR"]
         argv = self.argv(request, home)
         (request.run_dir / "argv.json").write_text(json.dumps(argv, indent=2))
         outcome = await run_process(

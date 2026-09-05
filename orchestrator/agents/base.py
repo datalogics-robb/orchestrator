@@ -85,6 +85,8 @@ class AgentRequest:
     options: dict[str, Any] = field(default_factory=dict)
     prompt_and_parse: bool = False
     """Set by the pipeline when the adapter lacks native structured output."""
+    cli_login: bool = False
+    """Use the runtime's own stored login instead of an API key in env."""
 
 
 @dataclass

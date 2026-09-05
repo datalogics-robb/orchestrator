@@ -61,10 +61,12 @@ async def run_conformance(
     (work / "notes.txt").write_text("hello conformance\nsecond line\nthird line\n")
     run_dir = tmp / "run"
     run_dir.mkdir()
-    secrets = {role.auth.token_env or "API_KEY": api_key}
-    expected = getattr(runner, "api_key_var", None)
-    if expected:
-        secrets[expected] = api_key
+    secrets: dict[str, str] = {}
+    if api_key:
+        secrets = {role.auth.token_env or "API_KEY": api_key}
+        expected = getattr(runner, "api_key_var", None)
+        if expected:
+            secrets[expected] = api_key
     request = AgentRequest(
         cwd=work,
         prompt=PROMPT,
@@ -81,6 +83,7 @@ async def run_conformance(
         model=role.model,
         options=dict(role.options),
         prompt_and_parse=not runner.capabilities.structured_output,
+        cli_login=role.auth.use_cli_login,
     )
     result = await runner.run(request)
     report.add("run completes", result.ok, result.error or result.termination)

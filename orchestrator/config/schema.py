@@ -66,11 +66,18 @@ class AuthRef(StrictModel):
         description="Machine name in ~/.netrc whose password is the token (and whose login is the account, for Jira).",
     )
     token_env: str | None = Field(None, description="Environment variable holding the token.")
+    use_cli_login: bool = Field(
+        False,
+        description=(
+            "Reuse the tool's own login instead of a token: `gh auth token` for the repository, the Claude Code "
+            "login for claude-code, the Codex ChatGPT login for codex. Not valid for Jira or Confluence."
+        ),
+    )
 
     @model_validator(mode="after")
     def _exactly_one(self) -> AuthRef:
-        if bool(self.netrc_machine) == bool(self.token_env):
-            raise ValueError("auth needs exactly one of netrc_machine or token_env")
+        if sum(map(bool, (self.netrc_machine, self.token_env, self.use_cli_login))) != 1:
+            raise ValueError("auth needs exactly one of netrc_machine, token_env, or use_cli_login: true")
         return self
 
 
@@ -79,7 +86,9 @@ class Statuses(StrictModel):
 
     in_progress: str = Field("In Progress", description="Status set when work on an issue starts.")
     in_review: str = Field("In Review", description="Status set after the pull request is opened.")
-    blocked: str = Field("Blocked", description="Status set when the work cannot be completed.")
+    blocked: str = Field(
+        "Blocked", description="Status set when the work cannot be completed. Empty string: no transition."
+    )
 
 
 class TrackerConfig(StrictModel):

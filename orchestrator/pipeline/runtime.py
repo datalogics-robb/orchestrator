@@ -17,7 +17,7 @@ from orchestrator import agents
 from orchestrator.agents.base import AgentRunner, PathGrant
 from orchestrator.agents.registry import get_runner
 from orchestrator.build.runner import BuildSemaphore
-from orchestrator.config.loader import netrc_login, resolve_secret
+from orchestrator.config.loader import GH_TOKEN_COMMAND, netrc_login, resolve_secret
 from orchestrator.config.schema import Config, Role
 from orchestrator.docs.confluence import ConfluenceClient
 from orchestrator.mcp import passthrough
@@ -43,6 +43,7 @@ class RoleRuntime:
     grants: tuple[PathGrant, ...]
     mcp_servers: dict[str, dict[str, Any]]
     deny_tools: dict[str, list[str]]
+    cli_login: bool = False
 
 
 @dataclass
@@ -96,13 +97,15 @@ class Runtime:
 def _role_runtime(cfg: Config, role: Role, redactor: Redactor, repo_root: Path) -> RoleRuntime:
     role_cfg = cfg.agents.role(role)
     runner = get_runner(role_cfg.runner)
-    token = resolve_secret(role_cfg.auth)
-    redactor.add(token)
-    names = {role_cfg.auth.token_env or "API_KEY"}
-    expected = getattr(runner, "api_key_var", None)
-    if expected:
-        names.add(expected)
-    secrets = {n: token for n in names}
+    secrets: dict[str, str] = {}
+    if not role_cfg.auth.use_cli_login:
+        token = resolve_secret(role_cfg.auth)
+        redactor.add(token)
+        names = {role_cfg.auth.token_env or "API_KEY"}
+        expected = getattr(runner, "api_key_var", None)
+        if expected:
+            names.add(expected)
+        secrets = {n: token for n in names}
     servers = passthrough.servers_for_role(cfg, role, repo_root)
     for v in passthrough.secret_values(servers):
         redactor.add(v)
@@ -112,6 +115,7 @@ def _role_runtime(cfg: Config, role: Role, redactor: Redactor, repo_root: Path) 
         grants=grants_for(cfg, role),
         mcp_servers=servers,
         deny_tools=passthrough.deny_tools_for(cfg, servers),
+        cli_login=role_cfg.auth.use_cli_login,
     )
 
 
@@ -156,7 +160,7 @@ def build_runtime(
     github_token: str | None = None
     github: GitHubHost | None = None
     try:
-        github_token = resolve_secret(cfg.repo.auth)
+        github_token = resolve_secret(cfg.repo.auth, cli_command=GH_TOKEN_COMMAND)
         redactor.add(github_token)
         github = GitHubHost(cfg.repo, github_token, cfg.repo.clone_path)
     except Exception:

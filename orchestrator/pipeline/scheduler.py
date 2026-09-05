@@ -19,7 +19,8 @@ async def run_task(rt: Runtime, spec: TaskSpec, task: TaskState) -> TaskState:
         if "started" in rt.cfg.tracker.comment_on and not rt.dry_run:
             try:
                 await rt.tracker.comment(task.key, f"Agent run {rt.run_id} started work on {task.key}.")
-                await rt.tracker.transition(task.key, rt.cfg.tracker.statuses.in_progress)
+                if rt.cfg.tracker.statuses.in_progress:
+                    await rt.tracker.transition(task.key, rt.cfg.tracker.statuses.in_progress)
             except Exception as e:  # noqa: BLE001 - never let write-back stop the work
                 rt.audit.record("jira_error", task.key, error=str(e))
     attempts = 0

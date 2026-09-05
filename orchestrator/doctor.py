@@ -11,7 +11,7 @@ from pathlib import Path
 
 from orchestrator.agents.base import Problem
 from orchestrator.agents.registry import UnknownRunner, get_runner
-from orchestrator.config.loader import SecretError, netrc_login, resolve_secret
+from orchestrator.config.loader import GH_TOKEN_COMMAND, SecretError, netrc_login, resolve_secret
 from orchestrator.config.schema import Config
 from orchestrator.docs.confluence import ConfluenceClient
 from orchestrator.mcp.passthrough import check_mcp
@@ -77,8 +77,17 @@ def check_secrets(cfg: Config) -> list[Check]:
         refs["confluence"] = cfg.confluence.auth
     for name, ref in refs.items():
         try:
-            resolve_secret(ref)
-            where = f"env {ref.token_env}" if ref.token_env else f"netrc {ref.netrc_machine}"
+            if ref.use_cli_login and name.startswith("agents."):
+                out.append(Check("secrets", "ok", f"{name}: uses the runtime's own login"))
+                continue
+            resolve_secret(ref, cli_command=GH_TOKEN_COMMAND if name == "repo" else None)
+            where = (
+                f"env {ref.token_env}"
+                if ref.token_env
+                else f"netrc {ref.netrc_machine}"
+                if ref.netrc_machine
+                else "gh auth token"
+            )
             out.append(Check("secrets", "ok", f"{name}: resolved from {where}"))
         except SecretError as e:
             out.append(Check("secrets", "fail", f"{name}: {e}"))
@@ -180,7 +189,7 @@ async def check_remote(cfg: Config) -> list[Check]:
             )
         )
     try:
-        token = resolve_secret(cfg.repo.auth)
+        token = resolve_secret(cfg.repo.auth, cli_command=GH_TOKEN_COMMAND)
         host = GitHubHost(cfg.repo, token, cfg.repo.clone_path)
         problems = await host.check()
         out.extend(Check("github", "fail", p) for p in problems)

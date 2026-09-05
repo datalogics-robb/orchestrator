@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -69,7 +70,7 @@ async def run_step(
     commands: list[list[str]],
     *,
     cwd: Path,
-    env: dict[str, str],
+    env: dict[str, str] | Callable[[], dict[str, str]],
     timeout_seconds: int,
     log_dir: Path,
     serialize: bool = False,
@@ -80,11 +81,13 @@ async def run_step(
     sem = BuildSemaphore.get() if serialize else None
     for i, argv in enumerate(commands):
         log_path = log_dir / f"{name}-{i:02d}.log"
+        # recomputed per command: a setup step may create the venv later commands run from
+        current_env = env() if callable(env) else env
         if sem:
             async with sem:
-                outcome = await run_process(argv, cwd=cwd, env=env, timeout=timeout_seconds)
+                outcome = await run_process(argv, cwd=cwd, env=current_env, timeout=timeout_seconds)
         else:
-            outcome = await run_process(argv, cwd=cwd, env=env, timeout=timeout_seconds)
+            outcome = await run_process(argv, cwd=cwd, env=current_env, timeout=timeout_seconds)
         log_path.write_text(
             outcome.stdout + ("\n--- stderr ---\n" + outcome.stderr if outcome.stderr else "")
         )
