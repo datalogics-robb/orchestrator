@@ -100,6 +100,25 @@ def test_hook_bash(command: str, blocked: bool) -> None:
     assert bool(reason) is blocked, reason
 
 
+@pytest.mark.parametrize(
+    "command,blocked",
+    [
+        ("git commit --no-verify -m x", True),
+        ("git commit -n -m x", True),
+        ("git commit -anm x", True),
+        ("git -c core.hooksPath=/dev/null commit -m x", True),
+        ("rm -rf .git/hooks", True),
+        ('git commit -am "note about -n"', False),
+        ("git commit --amend --no-edit", False),
+        ("git status && git commit -m done", False),
+    ],
+)
+def test_hook_protects_pre_commit(command: str, blocked: bool) -> None:
+    rules = {**RULES, "protect_hooks": True}
+    reason = decide({"tool_name": "Bash", "tool_input": {"command": command}}, rules)
+    assert bool(reason) is blocked, reason
+
+
 def test_hook_edit_paths() -> None:
     assert decide({"tool_name": "Edit", "tool_input": {"file_path": "/work/tree/a.py"}}, RULES) is None
     assert decide({"tool_name": "Write", "tool_input": {"file_path": "/etc/passwd"}}, RULES)

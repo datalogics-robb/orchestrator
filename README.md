@@ -89,6 +89,36 @@ Points worth knowing:
 - **Build and tests.** `build.commands` run under a global semaphore; `test.selection`
   picks a subset by `changed-paths`, `named-suite`, or `agent-chosen`. The full suite is
   never run; the PR body says so.
+- **Commits run the repository's pre-commit hooks.** When the target has a
+  `.pre-commit-config.yaml`, the orchestrator installs pre-commit's git hook in each
+  worktree (so an agent's own `git commit` runs the hooks) and runs `pre-commit run
+  --files` on the staged files before its own commit. Hooks that rewrite files are re-run
+  once; a failure goes back to the worker as a fix round. Agents are denied
+  `git commit --no-verify`, `-n`, and any change to `core.hooksPath` or `.git/hooks`.
+  `pre-commit` itself comes from the worktree venv (list it in the target's
+  `requirements.in`); `commit.pre_commit: false` turns the gate off.
+
+## What is shared between runs
+
+Two things deliberately cross the per-run isolation boundary. Know them before relying on
+the isolation elsewhere.
+
+- **The Claude Code configuration directory**, when the worker uses `use_cli_login`. The
+  subscription login is bound to the default `~/.claude` directory (an isolated
+  `CLAUDE_CONFIG_DIR` reports "not logged in" even with the account record copied), so the
+  worker runs from the developer's own config directory without `--bare`. Consequences:
+  the developer's global `CLAUDE.md`, skills, plugins, and hooks are loaded alongside the
+  orchestrator's; session transcripts land under `~/.claude/projects/`; and concurrent
+  worktrees share that directory. Still isolated per run: MCP servers (`--strict-mcp-config`
+  with only the allowlisted servers), tool denials, and the orchestrator's PreToolUse hook.
+  An `ANTHROPIC_API_KEY` in `token_env` restores full isolation.
+- **The Conan cache**, `~/.conan2` by default. Agents and builds inherit `HOME`, so every
+  worktree's `conan install` reads and writes the developer's cache and reuses its remote
+  logins. This is what makes bootstrap fast (packages download once) and what lets CI-style
+  builds work without extra credentials; it also means parallel worktrees populate one
+  cache concurrently, which Conan 2 supports with its own locking, and that a corrupted
+  package affects every worktree. Set `build.env: {CONAN_HOME: ...}` to point runs at a
+  separate cache when that trade is unwanted.
 
 ## Development
 

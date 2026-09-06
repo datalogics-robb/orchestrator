@@ -222,3 +222,52 @@ async def test_resume_from_checkpoint(config_path: Path) -> None:
     saved = rt.store.load_tasks(rt.run_id)["PROJ-7"]
     assert saved.state == "DONE" and saved.commit_sha == task.commit_sha
     assert rt.store.get_run(rt.run_id).keys == ["PROJ-7"]
+
+
+@pytest.mark.usefixtures("fake_runners")
+async def test_pre_commit_hooks_gate_the_commit(config_path: Path) -> None:
+    tracker = fakes.FakeTracker({"PROJ-8": fakes.issue("PROJ-8")})
+    rt, results = await _run(config_path, tracker, ["PROJ-8"])
+    task = results[0]
+    assert task.state == "DONE", task.error
+    log = (Path(task.worktree_path) / ".orchestrator" / "precommit.log").read_text().splitlines()
+    # installed into the worktree after setup, then run on the staged files before the commit
+    assert log[0].startswith("install")
+    assert any(line.startswith("run --files") and "agent_change.txt" in line for line in log)
+    audit = [json.loads(line) for line in rt.audit.path.read_text().splitlines()]
+    assert any(e["event"] == "pre_commit_install" and e["ok"] for e in audit)
+    assert any(e["event"] == "pre_commit" and e["ok"] for e in audit)
+
+
+@pytest.mark.usefixtures("fake_runners")
+async def test_pre_commit_failure_becomes_a_fix_round(config_path: Path) -> None:
+    # the first worker pass leaves a marker that makes the fake hook fail; the fix round removes it
+    fakes.SCRIPT["worker"].append(
+        {
+            "status": "completed",
+            "summary": "first try",
+            "changed_paths": ["agent_change.txt"],
+            "tests_selected": [],
+            "test_rationale": "",
+            "copied_files": [],
+            "_write": "v1",
+            "_touch": "precommit-fail",
+        }
+    )
+    original = fakes.default_worker_output
+
+    def fixing(request):
+        (request.cwd / "precommit-fail").unlink(missing_ok=True)
+        return original(request)
+
+    fakes.default_worker_output = fixing
+    try:
+        tracker = fakes.FakeTracker({"PROJ-9": fakes.issue("PROJ-9")})
+        rt, results = await _run(config_path, tracker, ["PROJ-9"])
+    finally:
+        fakes.default_worker_output = original
+    task = results[0]
+    assert task.state == "DONE", task.error
+    assert task.round == 1
+    assert "Pre-commit hooks failed" in fakes.CALLS["worker"][1].prompt
+    assert "fake-hook" in fakes.CALLS["worker"][1].prompt

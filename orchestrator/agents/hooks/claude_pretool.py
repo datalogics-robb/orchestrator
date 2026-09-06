@@ -22,6 +22,23 @@ def _under(path: str, roots: list[str]) -> bool:
     return False
 
 
+_COMMIT = re.compile(r"\bgit\b[^|;&]*?\bcommit\b([^|;&]*)")
+
+
+def bypasses_commit_hooks(command: str) -> bool:
+    """True for any way of committing without running the repository's hooks."""
+    if "core.hooksPath" in command or ".git/hooks" in command or "hooks.pre-commit" in command:
+        return True
+    for m in _COMMIT.finditer(command):
+        args = m.group(1)
+        if "--no-verify" in args:
+            return True
+        # -n, also folded into a cluster such as -an; long options start with -- and are ignored
+        if re.search(r"(^|\s)-[a-zA-Z]*n[a-zA-Z]*(\s|$)", args):
+            return True
+    return False
+
+
 def decide(payload: dict, rules: dict) -> str | None:
     """Return a denial reason, or None to allow."""
     tool = payload.get("tool_name", "")
@@ -33,6 +50,8 @@ def decide(payload: dict, rules: dict) -> str | None:
         for prefix in rules.get("deny_commands", []):
             if re.search(r"(^|[;&|]\s*|\$\(\s*|`\s*)" + re.escape(prefix.strip()) + r"(\s|$)", squashed):
                 return f"'{prefix.strip()}' is reserved for the orchestrator"
+        if rules.get("protect_hooks") and bypasses_commit_hooks(squashed):
+            return "commits must run the repository's pre-commit hooks; --no-verify, -n, and hooksPath changes are not allowed"
         if rules.get("read_only_worktree"):
             for pat in rules.get("write_patterns", []):
                 if re.search(pat, squashed):

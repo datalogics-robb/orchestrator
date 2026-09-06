@@ -543,6 +543,15 @@ Validation rules enforced by the loader:
   and the agent model.
 - Agent-created commits, if any, are squashed into this one so history is uniform.
 
+- Before committing, and whenever the target repository has a `.pre-commit-config.yaml`, the
+  orchestrator runs `pre-commit run --files <staged>` from the worktree venv. Hooks that
+  rewrite files in place are re-staged and re-run once; a remaining failure is a fix round
+  for the worker with the hook output, counted like a build or test failure. The same hook
+  is installed into each worktree at setup (`pre-commit install`) so an agent's own
+  `git commit` runs it, and agents are denied `--no-verify`, `-n`, `core.hooksPath`, and
+  writes to `.git/hooks`. Rationale: the first real run's PR failed CI's pre-commit stage on
+  formatting because the orchestrator committed with plain git.
+
 ### 6.6 Review
 
 - A fresh session on the configured reviewer adapter, with no shared context with the
@@ -637,6 +646,21 @@ process boundary rather than from Claude Code's permission prompts.
   `--add-dir` grants. Adapters without any such mechanism fall back to the fetch-only
   remote and scrubbed environment alone, and `doctor` says so.
 
+### 7.2a What is deliberately shared
+
+Two things cross the per-run boundary and are documented rather than hidden:
+
+- **The Claude Code configuration directory** under `use_cli_login`. The subscription
+  login lives in the default `~/.claude`, so the worker runs from there without `--bare`.
+  Loaded alongside the orchestrator's material: the developer's global `CLAUDE.md`, skills,
+  plugins, and hooks. Shared across concurrent worktrees: session storage under
+  `~/.claude/projects/`. Still per run: the MCP allowlist via `--strict-mcp-config`, tool
+  denials, the PreToolUse policy hook. Providing an `ANTHROPIC_API_KEY` restores isolation.
+- **The Conan cache** (`~/.conan2`), because agents and builds inherit `HOME`. Every
+  worktree's bootstrap reads and writes one cache and reuses the developer's authenticated
+  remotes; parallel bootstraps populate it concurrently under Conan 2's own locking. A
+  separate cache per orchestrator is one line: `build.env: {CONAN_HOME: <path>}`.
+
 ### 7.3 Untrusted input
 
 - Jira descriptions, comments, and Confluence pages are untrusted. They are placed in
@@ -728,6 +752,9 @@ from any environment belonging to a target project, and the two never mix.
   The orchestrator's `python-env-*` directory, its `VIRTUAL_ENV`, and any `PYTHON*`
   variables are removed, so the worker's `python` and `pytest` resolve to the target
   project's interpreter, never the orchestrator's.
+- **Conan cache.** Builds share the developer's `~/.conan2` (section 7.2a). The first
+  bootstrap per machine downloads packages; later worktrees reuse them, which is why a
+  fresh worktree's setup took under four minutes in the first real run.
 - **Interpreter requirement.** mkenv uses whichever `python` runs it, so `doctor` checks
   that the orchestrator is running on 3.13 or later and that `sys.prefix` is inside the
   repo's `python-env-*` directory, and warns otherwise.

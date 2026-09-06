@@ -116,18 +116,33 @@ class WorktreeManager:
                 excluded.append(rel)
         return excluded
 
-    async def commit_all(self, wt: Worktree, message: str) -> tuple[str | None, list[str]]:
-        """Squash any agent commits and the working tree into one commit. Returns (sha, excluded)."""
-        # Fold agent-made commits back into the index so history has exactly one commit.
+    async def stage_all(self, wt: Worktree) -> list[str]:
+        """Fold agent commits back into the index and stage the working tree. Returns excluded paths."""
         await git("reset", "--soft", f"origin/{wt.base}", cwd=wt.path)
         await git("add", "-A", cwd=wt.path)
-        excluded = await self._filter_staged(wt)
+        return await self._filter_staged(wt)
+
+    async def staged_files(self, wt: Worktree) -> list[str]:
+        res = await git("diff", "--cached", "--name-only", "--diff-filter=ACMR", cwd=wt.path)
+        return [p for p in res.out.splitlines() if p.strip()]
+
+    async def restage(self, wt: Worktree, files: list[str]) -> None:
+        """Re-add files a hook rewrote in place."""
+        if files:
+            await git("add", "--", *files, cwd=wt.path)
+
+    async def commit_staged(self, wt: Worktree, message: str) -> str | None:
+        """Commit the index as one commit; None when nothing is staged. Hooks are the caller's job."""
         staged = await git("diff", "--cached", "--quiet", cwd=wt.path, check=False)
         if staged.code == 0:
-            return None, excluded
+            return None
         await git("-c", "commit.gpgsign=false", "commit", "-q", "-m", message, cwd=wt.path)
-        sha = (await git("rev-parse", "HEAD", cwd=wt.path)).out.strip()
-        return sha, excluded
+        return (await git("rev-parse", "HEAD", cwd=wt.path)).out.strip()
+
+    async def commit_all(self, wt: Worktree, message: str) -> tuple[str | None, list[str]]:
+        """Squash any agent commits and the working tree into one commit. Returns (sha, excluded)."""
+        excluded = await self.stage_all(wt)
+        return await self.commit_staged(wt, message), excluded
 
     async def push(self, wt: Worktree, token: str) -> None:
         """Push with a one-off credential helper so the token never lands in config."""

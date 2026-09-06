@@ -80,6 +80,8 @@ class _Fake:
             out = SCRIPT[self.role].pop(0)
             if out.get("_write"):
                 (request.cwd / "agent_change.txt").write_text(out.pop("_write"))
+            if out.get("_touch"):
+                (request.cwd / out.pop("_touch")).write_text("")
         elif self.role == "worker":
             out = default_worker_output(request)
         else:

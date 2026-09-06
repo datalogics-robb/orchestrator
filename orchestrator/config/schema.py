@@ -338,6 +338,25 @@ class SchedulerConfig(StrictModel):
     )
 
 
+class CommitConfig(StrictModel):
+    """How the orchestrator commits, and what it requires of agents that commit."""
+
+    pre_commit: bool = Field(
+        True,
+        description=(
+            "Run the repository's pre-commit hooks on the staged files before the orchestrator commits, "
+            "when .pre-commit-config.yaml exists. Hook failures go back to the worker as a fix round."
+        ),
+    )
+    install_hooks: bool = Field(
+        True,
+        description=(
+            "Install pre-commit's git hook in each worktree so an agent's own `git commit` runs the hooks. "
+            "Bypassing them (--no-verify, -n, core.hooksPath) is denied to agents regardless."
+        ),
+    )
+
+
 class HooksConfig(StrictModel):
     """Shell hooks run by the orchestrator at fixed points."""
 
@@ -362,6 +381,7 @@ class Config(StrictModel):
     test: TestConfig = Field(TestConfig(), description="Test settings.")
     agents: AgentsConfig = Field(description="Agent roles.")
     scheduler: SchedulerConfig = Field(SchedulerConfig(), description="Concurrency and retries.")
+    commit: CommitConfig = Field(CommitConfig(), description="Commit rules: pre-commit hooks.")
     hooks: HooksConfig = Field(HooksConfig(), description="Shell hooks.")
 
     @model_validator(mode="after")

@@ -27,7 +27,17 @@ WRITE_PATTERNS = [
 ]
 
 # Commands no role may run; the orchestrator does pushing and PR creation itself.
-DEFAULT_DENY_COMMANDS = ["git push", "gh ", "git remote set-url", "curl ", "wget "]
+DEFAULT_DENY_COMMANDS = [
+    "git push",
+    "gh ",
+    "git remote set-url",
+    "curl ",
+    "wget ",
+    # commits must run the repository's pre-commit hooks
+    "git commit --no-verify",
+    "git commit -n",
+    "git config core.hooksPath",
+]
 
 
 def which(binary: str) -> str | None:
@@ -111,4 +121,5 @@ def hook_rules(request: AgentRequest) -> dict[str, object]:
         "read_only_paths": read_only_paths(request.access),
         "write_roots": write_roots(request.access, request.cwd),
         "write_patterns": WRITE_PATTERNS,
+        "protect_hooks": True,
     }

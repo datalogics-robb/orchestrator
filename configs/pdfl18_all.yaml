@@ -90,6 +90,10 @@ agents:
     options:
       reasoning_effort: high
 
+commit:
+  pre_commit: true                     # run the repo's pre-commit hooks on staged files before committing
+  install_hooks: true                  # and install them in each worktree so agent commits run them too
+
 scheduler:
   max_parallel: 2
   retry_infra_failures: 2

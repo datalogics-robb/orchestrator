@@ -57,6 +57,7 @@ These MCP servers are available to you: {% for m in mcp_servers %}`{{ m }}`{% if
 
 - Do not run {% for d in deny_commands %}`{{ d }}`{% if not loop.last %}, {% endif %}{% endfor %}. The orchestrator pushes and opens the pull request.
 - Keep the change focused on the issue. Do not reformat unrelated code or add dependencies the issue does not need.
+- The repository's pre-commit hooks are the gate for every commit, yours and the orchestrator's. If the repo has a `.pre-commit-config.yaml`, run `pre-commit run --files <your files>` before you finish and fix what it reports; the orchestrator runs the same hooks before its commit and sends failures back to you.
 - Customer files from the shares must not be added to the repository.
 
 ## When you are done

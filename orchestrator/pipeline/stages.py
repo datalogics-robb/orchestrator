@@ -26,6 +26,7 @@ from orchestrator.intake.base import TaskSpec
 from orchestrator.pipeline.runtime import Runtime
 from orchestrator.pipeline.task import Blocked, Failed, State, TaskState
 from orchestrator.reporting import findings as findings_report
+from orchestrator.scm import precommit
 from orchestrator.scm.git import GitError
 from orchestrator.scm.github import ScmError
 from orchestrator.scm.worktree import Worktree
@@ -294,6 +295,9 @@ async def stage_worktree(rt: Runtime, spec: TaskSpec, task: TaskState) -> State:
         )
         if not step.ok:
             raise Failed(f"hooks.after_worktree failed:\n{step.failure_excerpt()}")
+    if rt.cfg.commit.install_hooks and precommit.config_present(wt.path):
+        result = await precommit.install_hooks(wt.path, env(), rt.task_dir(task.key) / "logs")
+        rt.audit.record("pre_commit_install", task.key, ok=result.ok, note=result.note)
     return "WORKING"
 
 
@@ -459,14 +463,40 @@ async def stage_commit(rt: Runtime, spec: TaskSpec, task: TaskState) -> State:
     model = rt.cfg.agents.worker.model or rt.role("worker").runner.name
     message = f"{task.key}: {spec.issue.summary}\n\n{summary}\n\nOrchestrator-Run: {rt.run_id}\nAgent: {rt.role('worker').runner.name} {model}"
     try:
-        sha, excluded = await rt.worktrees.commit_all(wt, message)
+        excluded = await rt.worktrees.stage_all(wt)
+        files = await rt.worktrees.staged_files(wt)
     except GitError as e:
         raise Failed(f"commit: {e}") from e
     task.excluded_from_commit = excluded
-    if sha is None:
+    if not files:
         raise Blocked(
             "technical", "The worker reported completion but the working tree has no changes to commit."
         )
+    if rt.cfg.commit.pre_commit and precommit.config_present(wt.path):
+        result = await precommit.run_on_files(
+            wt.path,
+            files,
+            _build_env(rt, task, wt.path),
+            rt.task_dir(task.key) / "logs" / f"pre-commit-r{task.round}.log",
+        )
+        if result.autofixed:
+            await rt.worktrees.restage(wt, files)
+        rt.audit.record("pre_commit", task.key, ok=result.ok, autofixed=result.autofixed, round=task.round)
+        if not result.ok:
+            return _fail_or_fix(
+                rt,
+                task,
+                f"## Pre-commit hooks failed\n\nThe repository's pre-commit hooks rejected the change. "
+                f"Fix what they report; do not bypass them.\n\n```\n{result.output}\n```",
+                "pre-commit",
+                "The repository's pre-commit hooks rejected the change and the worker could not repair it.",
+            )
+    try:
+        sha = await rt.worktrees.commit_staged(wt, message)
+    except GitError as e:
+        raise Failed(f"commit: {e}") from e
+    if sha is None:
+        raise Blocked("technical", "Nothing remained to commit after the pre-commit hooks ran.")
     task.commit_sha = sha
     rt.audit.record("commit", task.key, sha=sha, excluded=excluded)
     return "REVIEWING"

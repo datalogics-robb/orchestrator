@@ -14,6 +14,19 @@ def _git(*args: str, cwd: Path) -> None:
     subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
 
 
+FAKE_PRECOMMIT_SCRIPT = """#!/bin/sh
+mkdir -p .orchestrator
+echo "$*" >> .orchestrator/precommit.log
+if [ "$1" = run ] && [ -e precommit-fail ]; then echo "fake-hook.....Failed"; exit 1; fi
+exit 0
+"""
+FAKE_PRECOMMIT_SETUP = (
+    "python3 -c \"import pathlib,stat;b=pathlib.Path('python-env-fake/bin');b.mkdir(parents=True,exist_ok=True);"
+    f"p=b/'pre-commit';p.write_text({FAKE_PRECOMMIT_SCRIPT!r});p.chmod(p.stat().st_mode|stat.S_IXUSR);"
+    "q=b/'python';q.write_text('#!/bin/sh\\nexit 0\\n');q.chmod(q.stat().st_mode|stat.S_IXUSR)\""
+)
+
+
 @pytest.fixture
 def git_repo(tmp_path: Path) -> tuple[Path, Path]:
     """A bare 'origin' and a clone with one commit on branch develop."""
@@ -25,7 +38,9 @@ def git_repo(tmp_path: Path) -> tuple[Path, Path]:
     _git("config", "user.name", "Test", cwd=clone)
     _git("checkout", "-q", "-b", "develop", cwd=clone)
     (clone / "README.md").write_text("# target\n")
-    _git("add", "README.md", cwd=clone)
+    (clone / ".pre-commit-config.yaml").write_text("repos: []\n")
+    (clone / ".gitignore").write_text("python-env-*/\nprecommit-fail\n")
+    _git("add", "README.md", ".pre-commit-config.yaml", ".gitignore", cwd=clone)
     _git("-c", "commit.gpgsign=false", "commit", "-q", "-m", "init", cwd=clone)
     _git("push", "-q", "-u", "origin", "develop", cwd=clone)
     return origin, clone
@@ -64,7 +79,13 @@ def config_dict(git_repo: tuple[Path, Path], shares: tuple[Path, Path], tmp_path
             "support": {"paths": {"darwin": str(support), "linux": str(support)}},
             "raid": {"paths": {"darwin": str(raid), "linux": str(raid)}, "write_under": ["agent-drops"]},
         },
-        "build": {"commands": ["python3 -c pass"], "timeout_minutes": 1},
+        "build": {
+            # setup stands in for mkenv: it creates a fake worktree venv holding a fake pre-commit that
+            # logs its invocations and fails `run` while a precommit-fail marker exists in the worktree
+            "setup": [FAKE_PRECOMMIT_SETUP],
+            "commands": ["python3 -c pass"],
+            "timeout_minutes": 1,
+        },
         "test": {
             "timeout_minutes": 1,
             "selection": {
