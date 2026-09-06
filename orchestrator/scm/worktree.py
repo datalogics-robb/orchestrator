@@ -131,12 +131,18 @@ class WorktreeManager:
         if files:
             await git("add", "--", *files, cwd=wt.path)
 
-    async def commit_staged(self, wt: Worktree, message: str) -> str | None:
-        """Commit the index as one commit; None when nothing is staged. Hooks are the caller's job."""
+    async def commit_staged(
+        self, wt: Worktree, message: str, env: dict[str, str] | None = None
+    ) -> str | None:
+        """Commit the index as one commit; None when nothing is staged.
+
+        `env` is the build environment: git hooks installed in the worktree (pre-commit) run
+        inside this commit and need the worktree venv on PATH, exactly like the build does.
+        """
         staged = await git("diff", "--cached", "--quiet", cwd=wt.path, check=False)
         if staged.code == 0:
             return None
-        await git("-c", "commit.gpgsign=false", "commit", "-q", "-m", message, cwd=wt.path)
+        await git("-c", "commit.gpgsign=false", "commit", "-q", "-m", message, cwd=wt.path, env=env)
         return (await git("rev-parse", "HEAD", cwd=wt.path)).out.strip()
 
     async def commit_all(self, wt: Worktree, message: str) -> tuple[str | None, list[str]]:

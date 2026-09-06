@@ -492,7 +492,7 @@ async def stage_commit(rt: Runtime, spec: TaskSpec, task: TaskState) -> State:
                 "The repository's pre-commit hooks rejected the change and the worker could not repair it.",
             )
     try:
-        sha = await rt.worktrees.commit_staged(wt, message)
+        sha = await rt.worktrees.commit_staged(wt, message, env=_build_env(rt, task, wt.path))
     except GitError as e:
         raise Failed(f"commit: {e}") from e
     if sha is None:

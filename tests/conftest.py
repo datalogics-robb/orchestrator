@@ -17,14 +17,23 @@ def _git(*args: str, cwd: Path) -> None:
 FAKE_PRECOMMIT_SCRIPT = """#!/bin/sh
 mkdir -p .orchestrator
 echo "$*" >> .orchestrator/precommit.log
+if [ "$1" = install ]; then
+  hooks=$(git rev-parse --git-path hooks); mkdir -p "$hooks"
+  printf '#!/bin/sh\\ncommand -v pre-commit >/dev/null || { echo "pre-commit not on PATH in git hook"; exit 1; }\\nexec pre-commit run --hook-stage commit\\n' > "$hooks/pre-commit"
+  chmod +x "$hooks/pre-commit"
+fi
 if [ "$1" = run ] && [ -e precommit-fail ]; then echo "fake-hook.....Failed"; exit 1; fi
 exit 0
 """
-FAKE_PRECOMMIT_SETUP = (
-    "python3 -c \"import pathlib,stat;b=pathlib.Path('python-env-fake/bin');b.mkdir(parents=True,exist_ok=True);"
-    f"p=b/'pre-commit';p.write_text({FAKE_PRECOMMIT_SCRIPT!r});p.chmod(p.stat().st_mode|stat.S_IXUSR);"
-    "q=b/'python';q.write_text('#!/bin/sh\\nexit 0\\n');q.chmod(q.stat().st_mode|stat.S_IXUSR)\""
-)
+
+
+def fake_precommit_setup(script_path: Path) -> str:
+    """A build.setup command that plants the fake pre-commit (and a python stub) in a fake worktree venv."""
+    return (
+        "python3 -c \"import pathlib,shutil;b=pathlib.Path('python-env-fake/bin');b.mkdir(parents=True,exist_ok=True);"
+        f"p=b/'pre-commit';shutil.copy('{script_path}',p);p.chmod(0o755);"
+        "q=b/'python';q.write_text('#!/bin/sh\\nexit 0\\n');q.chmod(0o755)\""
+    )
 
 
 @pytest.fixture
@@ -60,6 +69,8 @@ def shares(tmp_path: Path) -> tuple[Path, Path]:
 def config_dict(git_repo: tuple[Path, Path], shares: tuple[Path, Path], tmp_path: Path) -> dict:
     _, clone = git_repo
     support, raid = shares
+    fake_script = tmp_path / "fake-pre-commit"
+    fake_script.write_text(FAKE_PRECOMMIT_SCRIPT)
     return {
         "version": 1,
         "state_dir": str(tmp_path / "state"),
@@ -82,7 +93,7 @@ def config_dict(git_repo: tuple[Path, Path], shares: tuple[Path, Path], tmp_path
         "build": {
             # setup stands in for mkenv: it creates a fake worktree venv holding a fake pre-commit that
             # logs its invocations and fails `run` while a precommit-fail marker exists in the worktree
-            "setup": [FAKE_PRECOMMIT_SETUP],
+            "setup": [fake_precommit_setup(fake_script)],
             "commands": ["python3 -c pass"],
             "timeout_minutes": 1,
         },

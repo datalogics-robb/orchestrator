@@ -234,6 +234,8 @@ async def test_pre_commit_hooks_gate_the_commit(config_path: Path) -> None:
     # installed into the worktree after setup, then run on the staged files before the commit
     assert log[0].startswith("install")
     assert any(line.startswith("run --files") and "agent_change.txt" in line for line in log)
+    # the installed git hook ran inside the orchestrator's commit, with the venv on PATH
+    assert any(line.startswith("run --hook-stage commit") for line in log)
     audit = [json.loads(line) for line in rt.audit.path.read_text().splitlines()]
     assert any(e["event"] == "pre_commit_install" and e["ok"] for e in audit)
     assert any(e["event"] == "pre_commit" and e["ok"] for e in audit)
