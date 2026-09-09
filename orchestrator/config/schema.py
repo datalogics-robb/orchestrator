@@ -364,6 +364,51 @@ class HooksConfig(StrictModel):
     before_pr: list[Command] = Field([], description="Run in the worktree before pushing.")
 
 
+class FeatureWorkflowConfig(StrictModel):
+    """The red/green workflow for feature work: specify, approve, write failing tests, implement."""
+
+    require_approval: bool = Field(
+        True,
+        description="Pause after the specification so a person approves it (resume --approve) before any code "
+        "is written. With false, the approved spec is the worker's own.",
+    )
+    spec_review: bool = Field(
+        True, description="Have the reviewer critique the specification before the pause."
+    )
+    require_red: bool = Field(
+        True,
+        description="The new tests must build and then fail before the implementation starts. A passing or "
+        "non-building test set goes back to the worker.",
+    )
+    red_reject_patterns: list[str] = Field(
+        [],
+        description="Regexes matched against the failing test output. A match means the failure is not a real "
+        "red (missing data, skipped test) and is sent back to the worker.",
+    )
+    review_rounds: int = Field(
+        3, description="Fix rounds allowed for feature tasks; overrides agents.review_rounds."
+    )
+    spec_revisions: int = Field(2, description="How many times a rejected specification may be rewritten.")
+    max_cost_usd: float | None = Field(
+        None, description="Total agent spend per feature task before it is blocked as over budget."
+    )
+
+
+class WorkflowsConfig(StrictModel):
+    """Which workflow an issue gets. Bugs follow the default flow; features add spec and red/green phases."""
+
+    feature_issue_types: list[str] = Field(
+        ["Story", "New Feature", "Feature", "Improvement", "Enhancement"],
+        description="Jira issue types (case-insensitive) routed to the feature workflow. "
+        "`run --workflow feature` overrides for any issue.",
+    )
+    feature: FeatureWorkflowConfig = Field(FeatureWorkflowConfig(), description="Feature workflow settings.")
+
+    def workflow_for(self, issue_type: str) -> str:
+        lowered = {t.lower() for t in self.feature_issue_types}
+        return "feature" if issue_type.lower() in lowered else "bugfix"
+
+
 class Config(StrictModel):
     """Top-level configuration: one file per target repository."""
 
@@ -383,6 +428,9 @@ class Config(StrictModel):
     scheduler: SchedulerConfig = Field(SchedulerConfig(), description="Concurrency and retries.")
     commit: CommitConfig = Field(CommitConfig(), description="Commit rules: pre-commit hooks.")
     hooks: HooksConfig = Field(HooksConfig(), description="Shell hooks.")
+    workflows: WorkflowsConfig = Field(
+        WorkflowsConfig(), description="Bugfix versus feature workflow routing."
+    )
 
     @model_validator(mode="after")
     def _cross_checks(self) -> Config:
@@ -399,6 +447,9 @@ class Config(StrictModel):
             if self.test.selection.fallback:
                 object.__setattr__(self.test.selection, "commands", list(self.test.selection.fallback))
         return self
+
+    def review_rounds(self, workflow: str) -> int:
+        return self.workflows.feature.review_rounds if workflow == "feature" else self.agents.review_rounds
 
     @property
     def resolved_state_dir(self) -> Path:

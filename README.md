@@ -48,6 +48,9 @@ bin/orchestrator run PROJ-123 --show-prompt         # fetch context and print th
 bin/orchestrator status                             # recent runs
 bin/orchestrator status 20260903-141500-a1b2c3      # one run's tasks
 bin/orchestrator resume 20260903-141500-a1b2c3      # continue an interrupted run
+bin/orchestrator run PROJ-200 --workflow feature    # spec -> approval -> red tests -> implementation
+bin/orchestrator resume <run> --approve PROJ-200 --decisions answers.md   # accept the spec, with answers
+bin/orchestrator resume <run> --revise PROJ-200 --decisions changes.md    # send the spec back
 bin/orchestrator clean --older-than 7d              # remove old run directories and worktrees
 bin/orchestrator conformance codex --role reviewer  # prove an adapter works (spends tokens)
 bin/orchestrator config-reference                   # every accepted YAML key, from the schema
@@ -57,6 +60,29 @@ bin/orchestrator --help                             # the workflow, inputs, outp
 Every command accepts `--help`. `orchestrator --help` explains the workflow and what the tool
 reads and writes; `orchestrator config-reference` documents each configuration key with its
 type, default, and meaning (`--format markdown` for a document, `--section agents` to narrow).
+
+Bugs take the default path: implement, build, test, commit, review, PR. Feature work (routed by
+Jira issue type through `workflows.feature_issue_types`, or forced with `--workflow feature`)
+adds a specification phase and red/green test discipline:
+
+1. **Specify.** The worker reads the issue and the code and writes acceptance criteria, the
+   public API surface, the tests that will prove each criterion, assumptions, and questions.
+   The reviewer critiques it. The task stops at `AWAITING_APPROVAL`; the spec is attached to
+   the Jira issue and saved as `spec.md` in the task directory.
+2. **Approve or revise.** `resume --approve KEY` continues; `--decisions FILE` attaches your
+   answers and binding instructions, which the worker, the reviewer, and the PR all see.
+   `resume --revise KEY --decisions FILE` makes the worker rewrite the specification.
+3. **Red.** The worker writes the tests and only the interface stubs they need. The
+   orchestrator builds, runs them, and requires them to fail as assertions (not build errors or
+   resource problems, see `red_reject_patterns`), then commits them as the red commit.
+4. **Green.** The worker implements the specification. Build, the red tests plus anything the
+   worker adds, pre-commit, and the green commit follow. The red commit is never squashed away,
+   so the PR shows the tests failing before the change and passing after it.
+5. **Review against the spec.** The reviewer judges each acceptance criterion. Findings that
+   ask for behaviour the spec does not cover are marked `spec_gap` and go into the PR as open
+   design questions instead of consuming fix rounds.
+
+`run` exits 3 when every remaining task is waiting for approval.
 
 Each run writes to `<state_dir>/runs/<run-id>/`: per-issue prompts, agent transcripts,
 build and test logs, the diff sent for review, the PR body, `findings.md` when blocked,

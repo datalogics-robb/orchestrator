@@ -5,6 +5,27 @@ Review the change on branch `{{ task.branch }}` against `origin/{{ base_branch }
 ## The issue
 
 Files under `.orchestrator/context/` hold the issue (`issue.md`), discussion (`comments.md`), and any reference pages under `confluence/`. Verify the change does what the issue asks and nothing more.
+{% if spec_md %}
+## The approved specification
+
+This is feature work. A person approved the specification below{% if decisions %} together with the decisions that follow it{% endif %}, and the tests were committed and shown to fail before the implementation (the red commit). **Judge the change against this specification**, criterion by criterion.
+
+{{ spec_md }}
+{% if decisions %}
+### Approver's decisions
+
+{{ decisions }}
+{% endif %}
+{% if red_evidence %}
+Failing test output before the implementation:
+
+```
+{{ red_evidence }}
+```
+{% endif %}
+
+If you believe the specification itself is incomplete or wrong, say so as a finding with `"spec_gap": true`. Spec gaps go to the approver as open questions; they are not sent back to the worker and do not decide the verdict. Findings where the change fails an approved criterion, weakens a test, or has a defect are ordinary findings with `"spec_gap": false`.
+{% endif %}
 
 ## What the author reports
 
@@ -57,10 +78,11 @@ Only a JSON object:
   "verdict": "approve | request_changes",
   "findings": [
     {"severity": "blocking | major | minor | nit", "path": "file or null", "line": 42,
-     "title": "short title", "detail": "what is wrong and why", "suggested_fix": "how to fix it"}
+     "title": "short title", "detail": "what is wrong and why", "suggested_fix": "how to fix it",
+     "spec_gap": false}
   ],
   "summary_markdown": "two or three sentences for the pull request body"
 }
 ```
 
-Use `request_changes` only when there is at least one `blocking` or `major` finding.
+Use `request_changes` only when there is at least one `blocking` or `major` finding that is not a spec gap.

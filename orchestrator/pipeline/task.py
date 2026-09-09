@@ -10,6 +10,11 @@ State = Literal[
     "QUEUED",
     "CONTEXT",
     "WORKTREE",
+    "SPECIFYING",
+    "AWAITING_APPROVAL",
+    "TEST_WRITING",
+    "RED_CHECK",
+    "IMPLEMENTING",
     "WORKING",
     "BUILDING",
     "TESTING",
@@ -25,6 +30,10 @@ State = Literal[
 ]
 
 TERMINAL: frozenset[str] = frozenset({"DONE", "BLOCKED", "FAILED"})
+PAUSED: frozenset[str] = frozenset({"AWAITING_APPROVAL"})
+"""States where the task waits for a person; `resume --approve` or `--revise` moves it on."""
+
+Workflow = Literal["bugfix", "feature"]
 
 
 def now() -> str:
@@ -39,9 +48,22 @@ class TaskState:
     round: int = 0
     """Fix rounds used so far (build/test failures and review findings both count)."""
     outcome: Literal["completed", "blocked", "failed", ""] = ""
+    workflow: Workflow = "bugfix"
     branch: str | None = None
     worktree_path: str | None = None
     base_sha: str | None = None
+    spec: dict[str, Any] | None = None
+    """Feature workflow: the specification the worker produced (acceptance criteria, API, tests)."""
+    spec_review: dict[str, Any] | None = None
+    spec_revision: int = 0
+    decisions: str = ""
+    """Feature workflow: the approver's answers and instructions, verbatim."""
+    phase_commits: list[str] = field(default_factory=list)
+    """Feature workflow: SHAs of the red commit(s); the green squash resets to the last one."""
+    red_evidence: str = ""
+    """Feature workflow: excerpt of the failing test output that proved the tests were red."""
+    red_tests: list[list[str]] = field(default_factory=list)
+    """Feature workflow: the commands that were red; every later test stage runs them first."""
     worker_session: str | None = None
     reviewer_session: str | None = None
     commit_sha: str | None = None
@@ -71,6 +93,10 @@ class TaskState:
     @property
     def terminal(self) -> bool:
         return self.state in TERMINAL
+
+    @property
+    def paused(self) -> bool:
+        return self.state in PAUSED
 
     def to_json(self) -> dict[str, Any]:
         return asdict(self)

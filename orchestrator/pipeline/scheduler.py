@@ -6,9 +6,11 @@ import asyncio
 import traceback
 
 from orchestrator.intake.base import TaskSpec, cyclic_keys
-from orchestrator.pipeline import stages
+from orchestrator.pipeline import feature, stages
 from orchestrator.pipeline.runtime import Runtime
-from orchestrator.pipeline.task import Blocked, Failed, TaskState
+from orchestrator.pipeline.task import Blocked, Failed, TaskState, Workflow
+
+STAGES = {**stages.STAGES, **feature.STAGES}
 
 
 async def run_task(rt: Runtime, spec: TaskSpec, task: TaskState) -> TaskState:
@@ -24,9 +26,9 @@ async def run_task(rt: Runtime, spec: TaskSpec, task: TaskState) -> TaskState:
             except Exception as e:  # noqa: BLE001 - never let write-back stop the work
                 rt.audit.record("jira_error", task.key, error=str(e))
     attempts = 0
-    while not task.terminal:
+    while not task.terminal and not task.paused:
         rt.event(task.key, task.state, "")
-        stage = stages.STAGES[task.state]
+        stage = STAGES[task.state]
         try:
             next_state = await stage(rt, spec, task)
             task.transition(next_state)
@@ -48,6 +50,10 @@ async def run_task(rt: Runtime, spec: TaskSpec, task: TaskState) -> TaskState:
             await stages.handle_failed(rt, spec, task, Failed(f"unexpected error in {task.state}: {e!r}"))
             task.transition("FAILED")
         rt.store.save_task(rt.run_id, task)
+    if task.paused:
+        rt.audit.record("paused", task.key, state=task.state)
+        rt.event(task.key, task.state, f"resume {rt.run_id} --approve {task.key}")
+        return task
     rt.event(task.key, task.state, task.error or task.pr_url or "")
     if task.state == "DONE" and task.worktree_path and not rt.keep_worktrees:
         from pathlib import Path
@@ -57,13 +63,21 @@ async def run_task(rt: Runtime, spec: TaskSpec, task: TaskState) -> TaskState:
 
 
 async def run_all(
-    rt: Runtime, specs: list[TaskSpec], existing: dict[str, TaskState] | None = None
+    rt: Runtime,
+    specs: list[TaskSpec],
+    existing: dict[str, TaskState] | None = None,
+    workflow: Workflow | None = None,
 ) -> list[TaskState]:
+    """Run every spec to a terminal or paused state. `workflow` overrides issue-type routing for new tasks."""
     existing = existing or {}
     tasks: dict[str, TaskState] = {}
     for spec in specs:
         state = existing.get(spec.key) or TaskState(
-            key=spec.key, summary=spec.issue.summary, depends_on=spec.depends_on, epic_key=spec.epic_key
+            key=spec.key,
+            summary=spec.issue.summary,
+            depends_on=spec.depends_on,
+            epic_key=spec.epic_key,
+            workflow=workflow or rt.cfg.workflows.workflow_for(spec.issue.issue_type),  # type: ignore[arg-type]
         )
         tasks[spec.key] = state
         rt.store.save_task(rt.run_id, state)
@@ -89,6 +103,10 @@ async def run_all(
         for dep in spec.depends_on:
             if dep in done_events:
                 await done_events[dep].wait()
+                if tasks[dep].paused:
+                    # the dependency waits for a person; this task stays queued for the resume
+                    done_events[spec.key].set()
+                    return task
                 if tasks[dep].state != "DONE":
                     task.outcome = "blocked"
                     task.error = f"depends on {dep}, which ended {tasks[dep].state}"

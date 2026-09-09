@@ -123,9 +123,12 @@ class WorktreeManager:
                 excluded.append(rel)
         return excluded
 
-    async def stage_all(self, wt: Worktree) -> list[str]:
-        """Fold agent commits back into the index and stage the working tree. Returns excluded paths."""
-        await git("reset", "--soft", wt.base_ref, cwd=wt.path)
+    async def stage_all(self, wt: Worktree, reset_to: str | None = None) -> list[str]:
+        """Fold agent commits back into the index and stage the working tree. Returns excluded paths.
+
+        `reset_to` keeps commits up to that SHA (a red commit) and squashes only what follows.
+        """
+        await git("reset", "--soft", reset_to or wt.base_ref, cwd=wt.path)
         await git("add", "-A", cwd=wt.path)
         return await self._filter_staged(wt)
 

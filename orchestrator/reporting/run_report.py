@@ -10,16 +10,21 @@ from orchestrator.pipeline.task import TaskState
 
 def run_report_markdown(run_id: str, tasks: list[TaskState], dry_run: bool) -> str:
     lines = [f"# Orchestrator run {run_id}" + (" (dry run)" if dry_run else ""), ""]
-    counts = {"DONE": 0, "BLOCKED": 0, "FAILED": 0}
+    counts: dict[str, int] = {}
     for t in tasks:
         counts[t.state] = counts.get(t.state, 0) + 1
     lines.append(
-        f"Completed: {counts.get('DONE', 0)}  Blocked: {counts.get('BLOCKED', 0)}  Failed: {counts.get('FAILED', 0)}  Cost: ${sum(t.cost_usd for t in tasks):.2f}"
+        f"Completed: {counts.get('DONE', 0)}  Blocked: {counts.get('BLOCKED', 0)}  "
+        f"Failed: {counts.get('FAILED', 0)}  Awaiting approval: {counts.get('AWAITING_APPROVAL', 0)}  "
+        f"Cost: ${sum(t.cost_usd for t in tasks):.2f}"
     )
-    lines += ["", "| Issue | State | Rounds | Result |", "|---|---|---|---|"]
+    lines += ["", "| Issue | Workflow | State | Rounds | Result |", "|---|---|---|---|---|"]
     for t in tasks:
-        result = t.pr_url or (t.findings_path and f"findings: {t.findings_path}") or t.error or ""
-        lines.append(f"| {t.key} | {t.state} | {t.round} | {result} |")
+        if t.paused:
+            result = f"specification awaiting approval: `resume {run_id} --approve {t.key}`"
+        else:
+            result = t.pr_url or (t.findings_path and f"findings: {t.findings_path}") or t.error or ""
+        lines.append(f"| {t.key} | {t.workflow} | {t.state} | {t.round} | {result} |")
     lines.append("")
     return "\n".join(lines)
 

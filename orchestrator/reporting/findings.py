@@ -24,7 +24,8 @@ def findings_markdown(rt: Runtime, spec: TaskSpec, task: TaskState, blocked: Blo
         f"Issue: [{task.key}]({issue.url}) {issue.summary}  ",
         f"Run: `{rt.run_id}`  ",
         f"Reason: **{blocked.reason}**  ",
-        f"Fix rounds used: {task.round} of {rt.cfg.agents.review_rounds}  ",
+        f"Workflow: {task.workflow}  ",
+        f"Fix rounds used: {task.round} of {rt.cfg.review_rounds(task.workflow)}  ",
         f"Worker: {rt.role('worker').runner.name} ({rt.cfg.agents.worker.model or 'default model'})  ",
         f"Reviewer: {rt.role('reviewer').runner.name} ({rt.cfg.agents.reviewer.model or 'default model'})",
         "",
@@ -35,6 +36,21 @@ def findings_markdown(rt: Runtime, spec: TaskSpec, task: TaskState, blocked: Blo
     ]
     if blocked.questions:
         lines += ["## Questions for the reporter", ""] + [f"- {q}" for q in blocked.questions] + [""]
+    if task.spec:
+        from orchestrator.reporting.spec import spec_markdown
+
+        lines += ["## Specification", ""] + spec_markdown(task).splitlines()[2:] + [""]
+    if task.phase_commits:
+        lines += ["## Red commits", ""] + [f"- `{sha}`" for sha in task.phase_commits] + [""]
+        if task.red_evidence:
+            lines += [
+                "Failing test output before the implementation:",
+                "",
+                "```",
+                task.red_evidence,
+                "```",
+                "",
+            ]
     if task.worker_result and task.worker_result.get("summary"):
         lines += ["## What the worker did before stopping", "", task.worker_result["summary"], ""]
     if task.worker_result and task.worker_result.get("changed_paths"):

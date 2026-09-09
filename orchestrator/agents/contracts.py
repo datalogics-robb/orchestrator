@@ -35,6 +35,26 @@ class WorkerResult(Contract):
     blocked: BlockedInfo | None = None
 
 
+class PlannedTest(Contract):
+    name: str
+    proves: str = ""
+    """Which acceptance criteria the test demonstrates, by number or wording."""
+
+
+class SpecResult(Contract):
+    """The feature workflow's specification: what will be built and how it will be proved."""
+
+    status: Literal["completed", "blocked"]
+    summary: str = ""
+    acceptance_criteria: list[str] = []
+    api_surface: list[str] = []
+    tests: list[PlannedTest] = []
+    assumptions: list[str] = []
+    risks: list[str] = []
+    questions_for_reporter: list[str] = []
+    blocked: BlockedInfo | None = None
+
+
 class Finding(Contract):
     severity: Severity
     path: str | None = None
@@ -42,6 +62,9 @@ class Finding(Contract):
     title: str = ""
     detail: str = ""
     suggested_fix: str = ""
+    spec_gap: bool = False
+    """The finding asks for behaviour the approved specification does not cover. It is a question
+    for the approver, not a defect the worker must fix."""
 
     @model_validator(mode="after")
     def _title_from_detail(self) -> Finding:
@@ -58,11 +81,15 @@ class ReviewerResult(Contract):
 
     @property
     def actionable(self) -> list[Finding]:
-        return [f for f in self.findings if f.severity in ("blocking", "major")]
+        return [f for f in self.findings if f.severity in ("blocking", "major") and not f.spec_gap]
 
     @property
     def carried(self) -> list[Finding]:
-        return [f for f in self.findings if f.severity in ("minor", "nit")]
+        return [f for f in self.findings if f.severity in ("minor", "nit") and not f.spec_gap]
+
+    @property
+    def spec_gaps(self) -> list[Finding]:
+        return [f for f in self.findings if f.spec_gap]
 
 
 def _schema(model: type[BaseModel]) -> dict[str, Any]:
@@ -113,6 +140,7 @@ def strict_schema(schema: dict[str, Any]) -> dict[str, Any]:
 
 WORKER_SCHEMA: dict[str, Any] = _schema(WorkerResult)
 REVIEWER_SCHEMA: dict[str, Any] = _schema(ReviewerResult)
+SPEC_SCHEMA: dict[str, Any] = _schema(SpecResult)
 
 
 class ContractError(Exception):
@@ -131,3 +159,10 @@ def parse_reviewer(data: dict[str, Any]) -> ReviewerResult:
         return ReviewerResult.model_validate(data)
     except ValidationError as e:
         raise ContractError(f"reviewer result does not match contract: {e}") from e
+
+
+def parse_spec(data: dict[str, Any]) -> SpecResult:
+    try:
+        return SpecResult.model_validate(data)
+    except ValidationError as e:
+        raise ContractError(f"specification does not match contract: {e}") from e

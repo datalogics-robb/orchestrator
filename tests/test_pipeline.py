@@ -347,3 +347,185 @@ async def test_dependency_cycle_blocks_its_members_instead_of_hanging(config_pat
         assert results[key].state == "BLOCKED"
         assert "dependency cycle" in (results[key].error or "")
     assert fakes.CALLS["worker"] and all(r.cwd.name == "PROJ-4" for r in fakes.CALLS["worker"])
+
+
+# --- feature workflow ------------------------------------------------------------
+
+
+def _feature_config(config_dict: dict, config_path: Path, **feature: object) -> None:
+    import yaml
+
+    config_dict["test"]["selection"] = {"strategy": "agent-chosen", "allowed_prefixes": ["python3"]}
+    config_dict["workflows"] = {"feature": feature} if feature else {}
+    config_path.write_text(yaml.safe_dump(config_dict))
+
+
+def _failing_until(flag: Path) -> str:
+    return f"python3 -c \"import os, sys; sys.exit(0 if os.path.exists('{flag}') else 1)\""
+
+
+SPEC = {
+    "status": "completed",
+    "summary": "Add a frob option to the converter.",
+    "acceptance_criteria": ["1. frob() exists and returns 7", "2. frob(-1) is rejected"],
+    "api_surface": ["frob(): new public call; appended to the table so existing callers are unaffected"],
+    "tests": [{"name": "test_frob", "proves": "1, 2"}],
+    "assumptions": ["frob is off by default"],
+    "risks": [],
+    "questions_for_reporter": ["Should frob be on by default?"],
+}
+
+
+@pytest.mark.usefixtures("fake_runners")
+async def test_feature_workflow_pauses_for_approval_then_goes_red_then_green(
+    config_path: Path, config_dict: dict, tmp_path: Path
+) -> None:
+    from orchestrator.pipeline import feature
+
+    _feature_config(config_dict, config_path)
+    flag = tmp_path / "frob.implemented"
+    red_cmd = _failing_until(flag)
+    fakes.SCRIPT["worker"].extend(
+        [
+            SPEC,
+            {
+                "_write": "test_frob: asserts frob() == 7",
+                "status": "completed",
+                "summary": "Added test_frob and a frob() stub that fails.",
+                "changed_paths": ["agent_change.txt"],
+                "tests_selected": [red_cmd],
+                "test_rationale": "fails until frob exists",
+            },
+            {
+                "_touch": str(flag),
+                "_write": "frob implemented; test_frob unchanged",
+                "status": "completed",
+                "summary": "Implemented frob.",
+                "changed_paths": ["agent_change.txt"],
+                "tests_selected": ["python3 -c pass"],
+                "test_rationale": "red tests plus the converter group",
+            },
+        ]
+    )
+    fakes.SCRIPT["reviewer"].extend(
+        [
+            {
+                "verdict": "request_changes",
+                "findings": [{"severity": "major", "title": "criterion 2 names no error code"}],
+                "summary_markdown": "Say which error frob(-1) raises.",
+            },
+            {
+                "verdict": "approve",
+                "findings": [
+                    {"severity": "major", "title": "should frob also handle NaN?", "spec_gap": True}
+                ],
+                "summary_markdown": "Meets the specification.",
+            },
+        ]
+    )
+    tracker = fakes.FakeTracker({"PROJ-9": fakes.issue("PROJ-9", issue_type="Story")})
+    rt, results = await _run(config_path, tracker, ["PROJ-9"])
+    task = results[0]
+    assert task.workflow == "feature"
+    assert task.state == "AWAITING_APPROVAL", task.error
+    assert task.spec["acceptance_criteria"] == SPEC["acceptance_criteria"]
+    assert task.spec_review["verdict"] == "request_changes"
+    spec_md = (rt.task_dir("PROJ-9") / "spec.md").read_text()
+    assert "criterion 2 names no error code" in spec_md and "Should frob be on by default?" in spec_md
+    wt = Path(task.worktree_path)
+    assert (wt / ".orchestrator" / "context" / "spec.md").exists()
+    assert not (wt / "agent_change.txt").exists()  # nothing written during specification
+    audit = [json.loads(line) for line in rt.audit.path.read_text().splitlines()]
+    assert any(e["event"] == "jira_skipped" and (e.get("attach") or "").endswith("spec.md") for e in audit)
+    assert len(fakes.CALLS["worker"]) == 1 and len(fakes.CALLS["reviewer"]) == 1
+    assert "do not modify any file" in fakes.CALLS["worker"][0].prompt
+
+    # a person approves with a decision; the run resumes from the store
+    feature.approve(task, "Yes: frob is on by default.")
+    rt.store.save_task(rt.run_id, task)
+    specs = await ExplicitKeys(tracker, ["PROJ-9"]).tasks()
+    results = await run_all(rt, specs, rt.store.load_tasks(rt.run_id))
+    task = results[0]
+    assert task.state == "DONE", task.error
+    assert task.round == 0
+    assert (
+        (wt / ".orchestrator" / "context" / "decisions.md").read_text().endswith("frob is on by default.\n")
+    )
+    # red commit survives the squash; green is the only commit after it
+    log = _git("log", "--format=%H %s", "origin/develop..HEAD", cwd=wt).strip().splitlines()
+    assert len(log) == 2
+    green_sha, green_msg = log[0].split(" ", 1)
+    red_sha, red_msg = log[1].split(" ", 1)
+    assert red_msg.endswith("(red)") and green_msg.endswith("(green)")
+    assert task.phase_commits == [red_sha] and task.commit_sha == green_sha
+    assert "exit 1" in task.red_evidence or red_cmd.split()[0] in task.red_evidence
+    # the red tests ran again in the green check, ahead of what the worker listed
+    assert task.tests_run[0][0] == "python3" and "os.path.exists" in " ".join(task.tests_run[0])
+    assert ["python3", "-c", "pass"] in task.tests_run
+    red_req, green_req = fakes.CALLS["worker"][1], fakes.CALLS["worker"][2]
+    assert (
+        "tests only" in red_req.prompt
+        and "frob is on by default" in (wt / ".orchestrator/context/decisions.md").read_text()
+    )
+    assert "make the tests pass" in green_req.prompt and "os.path.exists" in green_req.prompt
+    review_req = fakes.CALLS["reviewer"][1]
+    assert "approved specification" in review_req.prompt and "frob is on by default" in review_req.prompt
+    body = (rt.task_dir("PROJ-9") / "pr-body.md").read_text()
+    assert "Red, then green" in body and red_sha in body and green_sha in body
+    assert "Open design questions" in body and "NaN" in body
+    assert "1. frob() exists and returns 7" in body
+
+
+@pytest.mark.usefixtures("fake_runners")
+async def test_feature_red_check_rejects_passing_and_resource_failures(
+    config_path: Path, config_dict: dict, tmp_path: Path
+) -> None:
+    _feature_config(
+        config_dict,
+        config_path,
+        require_approval=False,
+        spec_review=False,
+        red_reject_patterns=["ResourceProblem"],
+    )
+    flag = tmp_path / "frob.implemented"
+    red_cmd = _failing_until(flag)
+    base = {"status": "completed", "changed_paths": ["agent_change.txt"], "test_rationale": ""}
+    fakes.SCRIPT["worker"].extend(
+        [
+            SPEC,
+            {**base, "_write": "t1", "summary": "tests", "tests_selected": ["python3 -c pass"]},
+            {
+                **base,
+                "_write": "t2",
+                "summary": "tests",
+                "tests_selected": ["python3 -c \"import sys; print('ResourceProblem 55'); sys.exit(1)\""],
+            },
+            {**base, "_write": "t3", "summary": "tests", "tests_selected": [red_cmd]},
+            {**base, "_touch": str(flag), "_write": "impl", "summary": "implemented", "tests_selected": []},
+        ]
+    )
+    tracker = fakes.FakeTracker({"PROJ-10": fakes.issue("PROJ-10", issue_type="Improvement")})
+    rt, results = await _run(config_path, tracker, ["PROJ-10"])
+    task = results[0]
+    assert task.state == "DONE", task.error
+    assert task.round == 2 and len(task.phase_commits) == 1
+    prompts = [r.prompt for r in fakes.CALLS["worker"]]
+    assert "pass before the implementation" in prompts[2]
+    assert "not a real red" in prompts[3] and "ResourceProblem" in prompts[3]
+    assert "attempt 3" in prompts[3]
+    assert len(fakes.CALLS["reviewer"]) == 1  # code review only; spec review was off
+
+
+@pytest.mark.usefixtures("fake_runners")
+async def test_workflow_routing_and_override(config_path: Path, config_dict: dict) -> None:
+    _feature_config(config_dict, config_path)
+    cfg = load_config(config_path)
+    assert cfg.workflows.workflow_for("Story") == "feature"
+    assert cfg.workflows.workflow_for("bug") == "bugfix"
+    fakes.SCRIPT["worker"].append({**SPEC, "summary": "spec for a Bug run as a feature"})
+    tracker = fakes.FakeTracker({"PROJ-11": fakes.issue("PROJ-11", issue_type="Bug")})
+    rt = build_runtime(cfg, config_path, dry_run=True, keep_worktrees=True, tracker=tracker)
+    rt.store.create_run(rt.run_id, config_path, ["PROJ-11"], True)
+    specs = await ExplicitKeys(tracker, ["PROJ-11"]).tasks()
+    results = await run_all(rt, specs, workflow="feature")
+    assert results[0].workflow == "feature" and results[0].state == "AWAITING_APPROVAL"

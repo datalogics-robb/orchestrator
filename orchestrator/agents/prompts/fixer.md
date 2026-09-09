@@ -13,6 +13,11 @@ Inspect `git diff origin/{{ base_branch }}` to see the current change. Context f
 The change did not pass validation. Address everything below, then rebuild and rerun the relevant tests before finishing.
 
 {{ fix_reason }}
+{% if spec_md %}
+## The approved specification still governs
+
+The specification is in `.orchestrator/context/spec.md`{% if decisions %} and the approver's decisions in `.orchestrator/context/decisions.md`{% endif %}. Fix the findings within it. Do not weaken the red tests to get green; if a test itself is wrong, fix it and say why in your summary.
+{% endif %}
 
 ## Boundaries
 

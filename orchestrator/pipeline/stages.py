@@ -26,6 +26,7 @@ from orchestrator.intake.base import TaskSpec
 from orchestrator.pipeline.runtime import Runtime
 from orchestrator.pipeline.task import Blocked, Failed, State, TaskState
 from orchestrator.reporting import findings as findings_report
+from orchestrator.reporting.spec import spec_markdown
 from orchestrator.scm import precommit
 from orchestrator.scm.git import GitError
 from orchestrator.scm.github import ScmError
@@ -148,7 +149,60 @@ async def _run_agent(
     budget = rc.max_budget_usd
     if budget and result.cost_usd and result.cost_usd > budget and not rr.runner.capabilities.budget_cap:
         raise Failed(f"{role} spent ${result.cost_usd:.2f}, over the ${budget:.2f} budget")
+    _check_task_budget(rt, task)
     return result
+
+
+def _check_task_budget(rt: Runtime, task: TaskState) -> None:
+    """Feature tasks carry a total spend ceiling; crossing it is a blocked outcome for a person to weigh."""
+    cap = rt.cfg.workflows.feature.max_cost_usd if task.workflow == "feature" else None
+    if cap is not None and task.cost_usd > cap:
+        raise Blocked(
+            "budget",
+            f"Agent spend on this task reached ${task.cost_usd:.2f}, over the ${cap:.2f} ceiling set by "
+            "`workflows.feature.max_cost_usd`. Raise the ceiling and resume, or pick the work up by hand.",
+        )
+
+
+def _rounds(rt: Runtime, task: TaskState) -> int:
+    return rt.cfg.review_rounds(task.workflow)
+
+
+async def review_cwd(rt: Runtime, task: TaskState, wt: Worktree) -> Path:
+    """Where the reviewer runs: the worktree, or a snapshot when the runtime cannot enforce read-only."""
+    rr = rt.role("reviewer")
+    if rt.cfg.agents.reviewer.access == "read-only" and not rr.runner.capabilities.read_only_mode:
+        return await rt.worktrees.snapshot_copy(wt, rt.cfg.repo.worktree_root / f"{task.key}-review")
+    return wt.path
+
+
+async def precommit_gate(
+    rt: Runtime, task: TaskState, wt: Worktree, files: list[str], label: str
+) -> str | None:
+    """Run the repository's hooks on the staged files; returns the failure text, or None when clean."""
+    if not files or not rt.cfg.commit.pre_commit or not precommit.config_present(wt.path):
+        return None
+    result = await precommit.run_on_files(
+        wt.path,
+        files,
+        _build_env(rt, task, wt.path),
+        rt.task_dir(task.key) / "logs" / f"pre-commit-{label}.log",
+    )
+    if result.autofixed:
+        await rt.worktrees.restage(wt, files)
+    rt.audit.record(
+        "pre_commit", task.key, ok=result.ok, autofixed=result.autofixed, round=task.round, label=label
+    )
+    return None if result.ok else result.output
+
+
+def commit_message(rt: Runtime, spec: TaskSpec, task: TaskState, summary: str, phase: str = "") -> str:
+    model = rt.cfg.agents.worker.model or rt.role("worker").runner.name
+    suffix = f" ({phase})" if phase else ""
+    return (
+        f"{task.key}: {spec.issue.summary}{suffix}\n\n{summary}\n\n"
+        f"Orchestrator-Run: {rt.run_id}\nAgent: {rt.role('worker').runner.name} {model}"
+    )
 
 
 def _reprompt_text(error: str) -> str:
@@ -298,7 +352,7 @@ async def stage_worktree(rt: Runtime, spec: TaskSpec, task: TaskState) -> State:
     if rt.cfg.commit.install_hooks and precommit.config_present(wt.path):
         result = await precommit.install_hooks(wt.path, env(), rt.task_dir(task.key) / "logs")
         rt.audit.record("pre_commit_install", task.key, ok=result.ok, note=result.note)
-    return "WORKING"
+    return "SPECIFYING" if task.workflow == "feature" else "WORKING"
 
 
 def _prompt_common(rt: Runtime, spec: TaskSpec, task: TaskState, wt: Worktree, role: Role) -> dict[str, Any]:
@@ -324,7 +378,10 @@ def _prompt_common(rt: Runtime, spec: TaskSpec, task: TaskState, wt: Worktree, r
         ],
         "mcp_servers": list(rr.mcp_servers),
         "deny_commands": ["git push", "gh", "curl", "wget"],
-        "review_rounds": rt.cfg.agents.review_rounds,
+        "review_rounds": _rounds(rt, task),
+        "workflow": task.workflow,
+        "spec_md": spec_markdown(task, with_review=False) if task.spec else "",
+        "decisions": task.decisions,
     }
 
 
@@ -391,15 +448,18 @@ async def stage_fix(rt: Runtime, spec: TaskSpec, task: TaskState) -> State:
     return "BUILDING"
 
 
-def _fail_or_fix(rt: Runtime, task: TaskState, reason_md: str, kind: str, details: str) -> State:
-    if task.round < rt.cfg.agents.review_rounds:
+def _fail_or_fix(
+    rt: Runtime, task: TaskState, reason_md: str, kind: str, details: str, next_state: State = "FIXING"
+) -> State:
+    rounds = _rounds(rt, task)
+    if task.round < rounds:
         task.round += 1
         task.fix_reason = reason_md
-        rt.audit.record("fix_round", task.key, round=task.round, kind=kind)
-        return "FIXING"
+        rt.audit.record("fix_round", task.key, round=task.round, kind=kind, next_state=next_state)
+        return next_state
     raise Blocked(
         "technical",
-        f"{details}\n\nThe allowed number of fix rounds ({rt.cfg.agents.review_rounds}) was used up.\n\n{reason_md}",
+        f"{details}\n\nThe allowed number of fix rounds ({rounds}) was used up.\n\n{reason_md}",
     )
 
 
@@ -433,6 +493,8 @@ async def stage_test(rt: Runtime, spec: TaskSpec, task: TaskState) -> State:
     changed = await rt.worktrees.changed_paths(wt)
     agent_choice = (task.worker_result or {}).get("tests_selected", [])
     commands = selector_for(rt.cfg.test.selection).select(changed, agent_choice)
+    # the tests that were red always run again, whatever the worker listed
+    commands = task.red_tests + [c for c in commands if c not in task.red_tests]
     task.tests_run = commands
     if not commands:
         rt.audit.record("tests", task.key, ok=True, commands=[], note="no tests selected")
@@ -460,10 +522,11 @@ async def stage_test(rt: Runtime, spec: TaskSpec, task: TaskState) -> State:
 async def stage_commit(rt: Runtime, spec: TaskSpec, task: TaskState) -> State:
     wt = _worktree(rt, task)
     summary = (task.worker_result or {}).get("summary") or spec.issue.summary
-    model = rt.cfg.agents.worker.model or rt.role("worker").runner.name
-    message = f"{task.key}: {spec.issue.summary}\n\n{summary}\n\nOrchestrator-Run: {rt.run_id}\nAgent: {rt.role('worker').runner.name} {model}"
+    message = commit_message(rt, spec, task, summary, phase="green" if task.phase_commits else "")
+    # a red commit stays as it is; only the work after it is squashed
+    reset_to = task.phase_commits[-1] if task.phase_commits else None
     try:
-        excluded = await rt.worktrees.stage_all(wt)
+        excluded = await rt.worktrees.stage_all(wt, reset_to=reset_to)
         has_changes = await rt.worktrees.has_staged_changes(wt)
         files = await rt.worktrees.staged_files(wt)
     except GitError as e:
@@ -473,25 +536,16 @@ async def stage_commit(rt: Runtime, spec: TaskSpec, task: TaskState) -> State:
         raise Blocked(
             "technical", "The worker reported completion but the working tree has no changes to commit."
         )
-    if files and rt.cfg.commit.pre_commit and precommit.config_present(wt.path):
-        result = await precommit.run_on_files(
-            wt.path,
-            files,
-            _build_env(rt, task, wt.path),
-            rt.task_dir(task.key) / "logs" / f"pre-commit-r{task.round}.log",
+    hook_output = await precommit_gate(rt, task, wt, files, f"r{task.round}")
+    if hook_output is not None:
+        return _fail_or_fix(
+            rt,
+            task,
+            f"## Pre-commit hooks failed\n\nThe repository's pre-commit hooks rejected the change. "
+            f"Fix what they report; do not bypass them.\n\n```\n{hook_output}\n```",
+            "pre-commit",
+            "The repository's pre-commit hooks rejected the change and the worker could not repair it.",
         )
-        if result.autofixed:
-            await rt.worktrees.restage(wt, files)
-        rt.audit.record("pre_commit", task.key, ok=result.ok, autofixed=result.autofixed, round=task.round)
-        if not result.ok:
-            return _fail_or_fix(
-                rt,
-                task,
-                f"## Pre-commit hooks failed\n\nThe repository's pre-commit hooks rejected the change. "
-                f"Fix what they report; do not bypass them.\n\n```\n{result.output}\n```",
-                "pre-commit",
-                "The repository's pre-commit hooks rejected the change and the worker could not repair it.",
-            )
     try:
         sha = await rt.worktrees.commit_staged(wt, message, env=_build_env(rt, task, wt.path))
     except GitError as e:
@@ -505,13 +559,10 @@ async def stage_commit(rt: Runtime, spec: TaskSpec, task: TaskState) -> State:
 
 async def stage_review(rt: Runtime, spec: TaskSpec, task: TaskState) -> State:
     wt = _worktree(rt, task)
-    rr = rt.role("reviewer")
     diff = await rt.worktrees.diff(wt)
     diff_path = rt.task_dir(task.key) / f"diff-r{task.round}.patch"
     diff_path.write_text(diff)
-    cwd = wt.path
-    if rt.cfg.agents.reviewer.access == "read-only" and not rr.runner.capabilities.read_only_mode:
-        cwd = await rt.worktrees.snapshot_copy(wt, rt.cfg.repo.worktree_root / f"{task.key}-review")
+    cwd = await review_cwd(rt, task, wt)
     ctx = _prompt_common(rt, spec, task, wt, "reviewer")
     ctx.update(
         diff=diff if len(diff) <= MAX_INLINE_DIFF else "",
@@ -521,6 +572,7 @@ async def stage_review(rt: Runtime, spec: TaskSpec, task: TaskState) -> State:
         tests_run=[" ".join(c) for c in task.tests_run],
         round=task.round,
         cwd=str(cwd),
+        red_evidence=task.red_evidence,
     )
     prompt = rt.render("reviewer.md", **ctx)
     review: ReviewerResult
@@ -538,7 +590,12 @@ async def stage_review(rt: Runtime, spec: TaskSpec, task: TaskState) -> State:
     task.reviewer_session = result.session_id
     task.review_result = review.model_dump()
     rt.audit.record(
-        "review", task.key, verdict=review.verdict, findings=len(review.findings), round=task.round
+        "review",
+        task.key,
+        verdict=review.verdict,
+        findings=len(review.findings),
+        spec_gaps=len(review.spec_gaps),
+        round=task.round,
     )
     if cwd != wt.path:
         await rt.worktrees.remove(cwd, force=True)
@@ -591,6 +648,24 @@ def pr_body(rt: Runtime, spec: TaskSpec, task: TaskState) -> str:
         worker.get("summary", ""),
         "",
     ]
+    if task.spec:
+        lines += ["## Specification", ""]
+        lines += [f"{i}. {c}" for i, c in enumerate(task.spec.get("acceptance_criteria", []), 1)]
+        if task.decisions:
+            lines += ["", "Approver's decisions:", "", task.decisions.strip()]
+        lines.append("")
+    if task.phase_commits:
+        lines += [
+            "## Red, then green",
+            "",
+            "The first commit(s) add the tests and the interface they need; the orchestrator built them and "
+            "confirmed they fail. The final commit is the implementation that makes them pass.",
+            "",
+        ]
+        lines += [f"- red: `{sha}`" for sha in task.phase_commits] + [f"- green: `{task.commit_sha}`", ""]
+        if task.red_evidence:
+            lines += ["<details><summary>Failing output before the implementation</summary>", "", "```"]
+            lines += [task.red_evidence, "```", "", "</details>", ""]
     lines += ["## Tests run", ""]
     lines += [f"- `{' '.join(c)}`" for c in task.tests_run] or ["- none selected"]
     if worker.get("test_rationale"):
@@ -615,7 +690,23 @@ def pr_body(rt: Runtime, spec: TaskSpec, task: TaskState) -> str:
         ]
         if review.get("summary_markdown"):
             lines += [review["summary_markdown"], ""]
-        carried = [f for f in review.get("findings", []) if f.get("severity") in ("minor", "nit")]
+        gaps = [f for f in review.get("findings", []) if f.get("spec_gap")]
+        if gaps:
+            lines += [
+                "Open design questions the reviewer raised beyond the approved specification "
+                "(not fixed; for the human reviewer to decide):",
+                "",
+            ]
+            lines += [
+                f"- **{f['severity']}** {f['title']}" + (f": {f['detail']}" if f.get("detail") else "")
+                for f in gaps
+            ]
+            lines.append("")
+        carried = [
+            f
+            for f in review.get("findings", [])
+            if f.get("severity") in ("minor", "nit") and not f.get("spec_gap")
+        ]
         if carried:
             lines += ["Minor notes left for the human reviewer:", ""]
             lines += [

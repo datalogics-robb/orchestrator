@@ -276,7 +276,9 @@ def _progress_table(states: dict[str, tuple[str, str, float]]) -> Table:
     table.add_column("elapsed", justify="right")
     table.add_column("note")
     for key, (stage, note, started) in states.items():
-        color = {"DONE": "green", "BLOCKED": "yellow", "FAILED": "red"}.get(stage, "cyan")
+        color = {"DONE": "green", "BLOCKED": "yellow", "FAILED": "red", "AWAITING_APPROVAL": "magenta"}.get(
+            stage, "cyan"
+        )
         table.add_row(key, f"[{color}]{stage}[/{color}]", f"{int(time.monotonic() - started)}s", note[:80])
     return table
 
@@ -292,8 +294,13 @@ async def _run(
     show_prompt: bool,
     retry_failed: bool = False,
     only: list[str] | None = None,
+    workflow: str | None = None,
+    approve: str | None = None,
+    revise: str | None = None,
+    decisions: str = "",
 ) -> int:
     from orchestrator.intake.base import ExplicitKeys
+    from orchestrator.pipeline import feature
     from orchestrator.pipeline.runtime import build_runtime
     from orchestrator.pipeline.scheduler import run_all
     from orchestrator.reporting.run_report import run_report_markdown, write_run_report
@@ -307,6 +314,23 @@ async def _run(
             return 2
         keys = keys or row.keys
         existing = rt.store.load_tasks(resume_id)
+        for key, action in ((approve, "approve"), (revise, "revise")):
+            if not key:
+                continue
+            task = existing.get(key)
+            if task is None:
+                err.print(f"[red]{key} is not part of run {resume_id}[/red]")
+                return 2
+            try:
+                if action == "approve":
+                    feature.approve(task, decisions)
+                else:
+                    feature.revise(task, decisions, cfg.workflows.feature.spec_revisions)
+            except ValueError as e:
+                err.print(f"[red]{e}[/red]")
+                return 2
+            rt.store.save_task(resume_id, task)
+            rt.audit.record(action, key, decisions=decisions, state=task.state)
         if only:
             keys = [k for k in keys if k in only]
             existing = {k: t for k, t in existing.items() if k in only}
@@ -355,13 +379,25 @@ async def _run(
                 live.update(_progress_table(states))
 
             rt.on_event = on_event
-            results = await run_all(rt, specs, existing)
+            results = await run_all(rt, specs, existing, workflow=workflow)  # type: ignore[arg-type]
             live.update(_progress_table(states))
-        rt.store.finish_run(rt.run_id)
+        if not any(r.paused for r in results):
+            rt.store.finish_run(rt.run_id)
         report = write_run_report(rt.run_dir, rt.run_id, results, dry_run)
         console.print(run_report_markdown(rt.run_id, results, dry_run), markup=False)
         console.print(f"report: {report}")
-        return 0 if all(r.state == "DONE" for r in results) else 1
+        for r in results:
+            if r.paused:
+                console.print(
+                    f"[magenta]{r.key}[/magenta] is waiting for approval of its specification: "
+                    f"{rt.task_dir(r.key) / 'spec.md'}\n  approve: orchestrator resume {rt.run_id} --approve {r.key} "
+                    f"[--decisions FILE]\n  send back: orchestrator resume {rt.run_id} --revise {r.key} --decisions FILE"
+                )
+        if all(r.state == "DONE" for r in results):
+            return 0
+        if all(r.state == "DONE" or r.paused for r in results):
+            return 3
+        return 1
     finally:
         await rt.aclose()
 
@@ -395,13 +431,25 @@ def run(
         help="Fetch the issue and Confluence context, print the rendered worker prompt, and exit without "
         "creating a worktree or running an agent.",
     ),
+    workflow: str = typer.Option(
+        "auto",
+        "--workflow",
+        help="auto: route by Jira issue type (workflows.feature_issue_types). bugfix: implement, build, test, "
+        "review, PR. feature: specify, pause for approval, write failing tests (red commit), implement (green "
+        "commit), review against the specification, PR.",
+        show_default=True,
+    ),
 ) -> None:
     """Process the given issues through to pull requests.
 
     Progress is shown live, one row per issue. When all tasks finish, a run report is printed
     and saved under the run directory. Exit 0 only when every task reached DONE; a blocked
-    task leaves a findings.md and exits 1.
+    task leaves a findings.md and exits 1; exit 3 means every remaining task is a feature
+    waiting for its specification to be approved with `resume --approve`.
     """
+    if workflow not in ("auto", "bugfix", "feature"):
+        err.print("[red]--workflow must be auto, bugfix, or feature[/red]")
+        raise typer.Exit(2)
     if not keys:
         err.print("[red]give at least one issue or epic key, e.g. PROJ-123[/red]")
         raise typer.Exit(2)
@@ -423,6 +471,7 @@ def run(
             keep_worktrees=keep_worktrees,
             resume_id=None,
             show_prompt=show_prompt,
+            workflow=None if workflow == "auto" else workflow,
         )
     )
     raise typer.Exit(code)
@@ -443,14 +492,43 @@ def resume(
     only: list[str] = typer.Option(
         None, "--only", help="Restrict to these issue keys; repeatable. Others in the run are untouched."
     ),
+    approve: str | None = typer.Option(
+        None,
+        "--approve",
+        metavar="KEY",
+        help="Approve the specification of a feature task that is AWAITING_APPROVAL; it goes on to write "
+        "its failing tests. Combine with --decisions to attach answers and instructions the worker must follow.",
+    ),
+    revise: str | None = typer.Option(
+        None,
+        "--revise",
+        metavar="KEY",
+        help="Send a feature task's specification back to be rewritten. Requires --decisions saying what to change.",
+    ),
+    decisions: Path | None = typer.Option(
+        None,
+        "--decisions",
+        help="Markdown file with the approver's answers to the specification's questions and any binding "
+        "instructions. Recorded on the task, shown to the worker and the reviewer, and quoted in the PR.",
+        exists=True,
+        dir_okay=False,
+        readable=True,
+    ),
 ) -> None:
     """Continue an interrupted run from each task's last checkpoint.
 
     Tasks already DONE or BLOCKED are left alone; the others pick up at the stage they were
-    in. FAILED tasks are also left alone unless --retry-failed is given. A run started with
+    in. FAILED tasks are also left alone unless --retry-failed is given. A feature task waiting
+    at AWAITING_APPROVAL stays there unless --approve or --revise names it. A run started with
     --dry-run stays a dry run.
     """
     cfg = _load(config)
+    if revise and decisions is None:
+        err.print("[red]--revise needs --decisions FILE with what to change[/red]")
+        raise typer.Exit(2)
+    if approve and revise:
+        err.print("[red]give --approve or --revise, not both[/red]")
+        raise typer.Exit(2)
     code = asyncio.run(
         _run(
             cfg,
@@ -462,6 +540,9 @@ def resume(
             show_prompt=False,
             retry_failed=retry_failed,
             only=[k.upper() for k in only] if only else None,
+            approve=approve.upper() if approve else None,
+            revise=revise.upper() if revise else None,
+            decisions=decisions.read_text() if decisions else "",
         )
     )
     raise typer.Exit(code)
@@ -488,10 +569,13 @@ def status(
         console.print(table)
         return
     table = Table(title=f"run {run_id}")
-    for col in ("issue", "state", "rounds", "cost", "pr / error"):
+    for col in ("issue", "workflow", "state", "rounds", "cost", "pr / error"):
         table.add_column(col)
     for t in store.load_tasks(run_id).values():
-        table.add_row(t.key, t.state, str(t.round), f"${t.cost_usd:.2f}", t.pr_url or t.error or "")
+        note = t.pr_url or t.error or ""
+        if t.paused:
+            note = f"spec awaiting approval: resume {run_id} --approve {t.key}"
+        table.add_row(t.key, t.workflow, t.state, str(t.round), f"${t.cost_usd:.2f}", note)
     console.print(table)
 
 

@@ -74,6 +74,10 @@ Per-issue state machine:
 QUEUED → CONTEXT → WORKTREE → WORKING → BUILDING → TESTING → COMMITTING
    → REVIEWING → (FIXING → BUILDING …) → PUSHING → OPENING_PR → REPORTING → DONE
 
+feature workflow (section 6.10) replaces WORKING with:
+   WORKTREE → SPECIFYING → AWAITING_APPROVAL ⇢ (resume --approve) → TEST_WRITING → RED_CHECK
+   → IMPLEMENTING → BUILDING …            (resume --revise ⇢ SPECIFYING; RED_CHECK ⇢ TEST_WRITING on a bad red)
+
 Any state → BLOCKED   (agent declared it cannot proceed, or validation failed after retries)
 Any state → FAILED    (infrastructure error: auth, network, git, tool crash)
 ```
@@ -593,6 +597,47 @@ Validation rules enforced by the loader:
   <date>` with the findings or the run summary.
 - Local: `.orchestrator/runs/<run-id>/<key>/` holds prompts, raw agent output, logs, diff,
   findings, and the audit JSONL.
+
+### 6.10 Feature workflow: specify, approve, red, green
+
+A bug carries its own specification: the customer's file and the wrong output. A feature does
+not, and the first run of APDFL-6891 showed what happens without one: the worker built an API,
+a conversion pipeline, and a test in one pass, and the reviewer rejected it twice on design
+questions the issue never answered. Tasks routed to the feature workflow (by Jira issue type in
+`workflows.feature_issue_types`, or `run --workflow feature`) therefore replace WORKING with:
+
+- **SPECIFYING.** The worker reads the issue and the code and returns a `SpecResult`: summary,
+  numbered acceptance criteria, API surface with compatibility notes, the tests that will prove
+  each criterion, assumptions, risks, and questions only the approver can answer. It changes no
+  files. The reviewer critiques the specification (completeness, testability, API design,
+  assumptions that should be questions). Both are rendered to `spec.md` in the task directory and
+  in the worktree's `.orchestrator/context/`, and attached to the Jira issue.
+- **AWAITING_APPROVAL.** A paused, non-terminal state. The scheduler returns; `run` exits 3;
+  dependents stay queued. `resume --approve KEY [--decisions FILE]` moves the task to
+  TEST_WRITING and records the approver's text as `decisions`, binding on the worker and shown to
+  the reviewer and in the PR. `resume --revise KEY --decisions FILE` moves it back to SPECIFYING
+  (bounded by `spec_revisions`).
+- **TEST_WRITING (red).** The worker writes the specified tests plus the smallest interface that
+  lets them compile: declarations, enumerators, struct members, stubs that fail. Nothing else.
+- **RED_CHECK.** The orchestrator builds, selects the worker's test commands, runs them, and
+  accepts only a genuine failure: a passing set, a build break, or output matching
+  `red_reject_patterns` (missing data, skipped test) goes back to TEST_WRITING as a fix round.
+  Accepted tests pass the pre-commit gate and become the **red commit**; its SHA is kept in
+  `phase_commits`, the failing output in `red_evidence`, the commands in `red_tests`.
+- **IMPLEMENTING (green).** The worker implements the specification and may not weaken the red
+  tests. The shared BUILDING, TESTING, COMMITTING, REVIEWING stages follow; TESTING always runs
+  the red tests first, COMMITTING squashes only the work after the red commit (`stage_all(reset_to=
+  <red sha>)`) and labels it the green commit.
+- **Review against the spec.** The reviewer receives the specification, the decisions, and the
+  red evidence, and judges criterion by criterion. A finding marked `spec_gap` names behaviour
+  outside the approved specification; it does not affect the verdict or fix rounds and is listed
+  in the PR body as an open design question for the approver.
+
+Feature tasks use `workflows.feature.review_rounds` and a per-task `max_cost_usd` ceiling that
+blocks the task (reason `budget`) rather than running open-ended. The PR body carries the
+acceptance criteria, the decisions, the red and green SHAs, and the failing output, so a reader
+sees red-then-green without checking out the branch. Not yet part of the workflow: verifying red
+and green on CI rather than only on the orchestrator's platform (section 11).
 
 ## 7. Security
 
