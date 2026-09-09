@@ -21,7 +21,7 @@ from orchestrator.agents.runners.codex import render_config_toml, render_rules
 from orchestrator.build.selection import selector_for
 from orchestrator.config.schema import TestSelection as Selection
 from orchestrator.environment import build_env
-from orchestrator.intake.base import TaskSpec, order_by_dependencies
+from orchestrator.intake.base import TaskSpec, cyclic_keys, order_by_dependencies
 from orchestrator.mcp import passthrough
 from orchestrator.reporting.audit import Redactor
 from orchestrator.shares import cp
@@ -189,6 +189,18 @@ def test_dependency_order() -> None:
     assert [s.key for s in order_by_dependencies(specs)] == ["P-2", "P-3", "P-1"]
 
 
+def test_cyclic_keys_include_dependents_of_the_cycle() -> None:
+    specs = [
+        TaskSpec(issue("P-1"), ["P-2"]),
+        TaskSpec(issue("P-2"), ["P-1"]),
+        TaskSpec(issue("P-3"), ["P-1"]),
+        TaskSpec(issue("P-4"), []),
+        TaskSpec(issue("P-5"), ["P-9"]),  # outside the batch: not a cycle
+    ]
+    assert cyclic_keys(specs) == ["P-1", "P-2", "P-3"]
+    assert [s.key for s in order_by_dependencies(specs)][:2] == ["P-4", "P-5"]
+
+
 # --- adf ---------------------------------------------------------------------
 
 
@@ -283,6 +295,64 @@ def test_cp_helper(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         text=True,
     )
     assert proc.returncode == 0, proc.stderr
+
+
+def test_cp_refuses_destination_symlinks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    support = tmp_path / "support"
+    raid = tmp_path / "raid"
+    outside = tmp_path / "outside"
+    (support / "bundle" / "sub").mkdir(parents=True)
+    (support / "bundle" / "a.txt").write_text("a")
+    (support / "bundle" / "sub" / "b.txt").write_text("b")
+    (raid / "drops").mkdir(parents=True)
+    outside.mkdir()
+    (outside / "victim.txt").write_text("keep me")
+    grants = [
+        {"name": "support", "path": str(support), "mode": "read", "write_under": []},
+        {"name": "raid", "path": str(raid), "mode": "read-write", "write_under": [str(raid / "drops")]},
+    ]
+    (tmp_path / "grants.json").write_text(json.dumps(grants))
+    monkeypatch.setenv(cp.GRANTS_ENV, str(tmp_path / "grants.json"))
+    monkeypatch.delenv(cp.AUDIT_ENV, raising=False)
+    # a file symlink inside the destination directory pointing outside the share
+    (raid / "drops" / "bundle").mkdir()
+    (raid / "drops" / "bundle" / "a.txt").symlink_to(outside / "victim.txt")
+    assert cp.main(["support:bundle", "raid:drops/bundle"]) == 1
+    assert (outside / "victim.txt").read_text() == "keep me"
+    # a directory symlink inside the destination pointing outside the write roots
+    (raid / "drops" / "bundle" / "a.txt").unlink()
+    (raid / "elsewhere").mkdir()
+    (raid / "drops" / "bundle" / "sub").symlink_to(raid / "elsewhere")
+    assert cp.main(["support:bundle", "raid:drops/bundle"]) == 1
+    assert not (raid / "elsewhere" / "b.txt").exists()
+    # single file into a directory that is a symlink out of the share
+    (raid / "drops" / "link").symlink_to(outside)
+    assert cp.main(["support:bundle/a.txt", "raid:drops/link/a.txt"]) == 1
+    assert cp.main(["support:bundle/a.txt", "raid:drops/link"]) == 1
+    assert not (outside / "a.txt").exists()
+    # a clean destination still works
+    assert cp.main(["support:bundle/a.txt", "raid:drops/fresh/a.txt"]) == 0
+
+
+# --- subprocesses --------------------------------------------------------------
+
+
+async def test_run_process_cancellation_kills_the_child(tmp_path: Path) -> None:
+    import asyncio
+
+    from orchestrator.agents.base import run_process
+
+    pid_file = tmp_path / "pid"
+    argv = ["sh", "-c", f"echo $$ > {pid_file}; exec sleep 30"]
+    task = asyncio.ensure_future(run_process(argv, cwd=tmp_path, env=dict(os.environ), timeout=60))
+    while not pid_file.exists() or not pid_file.read_text().strip():
+        await asyncio.sleep(0.02)
+    pid = int(pid_file.read_text())
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
 
 
 # --- mcp passthrough ---------------------------------------------------------

@@ -58,6 +58,23 @@ def check_destination(grant: dict, target: Path) -> None:
         raise CopyError(f"destination must be under one of: {allowed}")
 
 
+def write_target(grant: dict, path: Path) -> Path:
+    """The real path a write to `path` lands on, checked against the grant.
+
+    Symlinks already present under the destination are followed before checking, so a link
+    that points outside the share or the write roots is refused. A final component that is
+    itself a symlink is refused outright: copying onto it would write through the link.
+    """
+    if path.is_symlink():
+        raise CopyError(f"refusing to write through symlink {path}")
+    resolved = path.resolve()
+    root = Path(grant["path"]).resolve()
+    if resolved != root and root not in resolved.parents:
+        raise CopyError(f"destination {path} resolves outside share '{grant['name']}'")
+    check_destination(grant, resolved)
+    return resolved
+
+
 def sha256(path: Path) -> str:
     h = hashlib.sha256()
     with path.open("rb") as f:
@@ -102,20 +119,22 @@ def copy(src_ref: str, dst_ref: str) -> list[dict]:
     if src.is_dir():
         for root, _dirs, files in os.walk(src):
             rel = Path(root).relative_to(src)
-            (dst / rel).mkdir(parents=True, exist_ok=True)
+            target_dir = write_target(dst_grant, dst / rel)
+            target_dir.mkdir(parents=True, exist_ok=True)
             for name in files:
                 s = Path(root) / name
                 if s.is_symlink():
                     continue
-                d = dst / rel / name
+                d = write_target(dst_grant, target_dir / name)
                 shutil.copy2(s, d)
                 record(s, d)
     else:
         if src.is_symlink():
             raise CopyError("refusing to copy a symlink")
-        dst.parent.mkdir(parents=True, exist_ok=True)
         if dst.is_dir():
             dst = dst / src.name
+        dst = write_target(dst_grant, dst)
+        write_target(dst_grant, dst.parent).mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dst)
         record(src, dst)
     audit(entries)

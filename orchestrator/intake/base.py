@@ -45,15 +45,28 @@ class ExplicitKeys:
         return order_by_dependencies(list(specs.values()))
 
 
+def cyclic_keys(specs: list[TaskSpec]) -> list[str]:
+    """Keys that can never become ready: they are in a dependency cycle or depend on one."""
+    remaining = {s.key: s for s in specs}
+    while remaining:
+        ready = [s for s in remaining.values() if not any(d in remaining for d in s.depends_on)]
+        if not ready:
+            break
+        for s in ready:
+            del remaining[s.key]
+    return sorted(remaining)
+
+
 def order_by_dependencies(specs: list[TaskSpec]) -> list[TaskSpec]:
-    """Stable topological order; dependencies on keys outside the batch are ignored."""
-    known = {s.key for s in specs}
+    """Stable topological order; dependencies on keys outside the batch are ignored.
+
+    Members of a cycle come last in input order; the scheduler refuses to run them.
+    """
     remaining = {s.key: s for s in specs}
     ordered: list[TaskSpec] = []
     while remaining:
-        ready = [s for s in remaining.values() if not any(d in remaining for d in s.depends_on if d in known)]
+        ready = [s for s in remaining.values() if not any(d in remaining for d in s.depends_on)]
         if not ready:
-            # dependency cycle: emit the rest in input order
             ordered.extend(remaining.values())
             break
         for s in ready:

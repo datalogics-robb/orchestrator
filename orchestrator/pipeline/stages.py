@@ -44,7 +44,7 @@ MAX_INLINE_DIFF = 120_000
 def _worktree(rt: Runtime, task: TaskState) -> Worktree:
     if not task.worktree_path or not task.branch:
         raise Failed("task has no worktree; cannot continue from this state")
-    return Worktree(Path(task.worktree_path), task.branch, rt.cfg.repo.base_branch)
+    return Worktree(Path(task.worktree_path), task.branch, rt.cfg.repo.base_branch, task.base_sha)
 
 
 def _context_dir(wt: Worktree) -> Path:
@@ -264,8 +264,8 @@ async def stage_worktree(rt: Runtime, spec: TaskSpec, task: TaskState) -> State:
         wt = await rt.worktrees.create(task.key, task.summary or spec.issue.summary)
     except GitError as e:
         raise Failed(f"worktree: {e}", transient=True) from e
-    task.branch, task.worktree_path = wt.branch, str(wt.path)
-    rt.audit.record("worktree_created", task.key, path=str(wt.path), branch=wt.branch)
+    task.branch, task.worktree_path, task.base_sha = wt.branch, str(wt.path), wt.base_sha
+    rt.audit.record("worktree_created", task.key, path=str(wt.path), branch=wt.branch, base_sha=wt.base_sha)
     # context files move into the worktree so the agent reads files, not a giant prompt
     src = rt.task_dir(task.key) / "context"
     dst = _context_dir(wt)
@@ -464,15 +464,16 @@ async def stage_commit(rt: Runtime, spec: TaskSpec, task: TaskState) -> State:
     message = f"{task.key}: {spec.issue.summary}\n\n{summary}\n\nOrchestrator-Run: {rt.run_id}\nAgent: {rt.role('worker').runner.name} {model}"
     try:
         excluded = await rt.worktrees.stage_all(wt)
+        has_changes = await rt.worktrees.has_staged_changes(wt)
         files = await rt.worktrees.staged_files(wt)
     except GitError as e:
         raise Failed(f"commit: {e}") from e
     task.excluded_from_commit = excluded
-    if not files:
+    if not has_changes:
         raise Blocked(
             "technical", "The worker reported completion but the working tree has no changes to commit."
         )
-    if rt.cfg.commit.pre_commit and precommit.config_present(wt.path):
+    if files and rt.cfg.commit.pre_commit and precommit.config_present(wt.path):
         result = await precommit.run_on_files(
             wt.path,
             files,

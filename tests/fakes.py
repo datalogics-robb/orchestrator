@@ -82,6 +82,8 @@ class _Fake:
                 (request.cwd / "agent_change.txt").write_text(out.pop("_write"))
             if out.get("_touch"):
                 (request.cwd / out.pop("_touch")).write_text("")
+            if out.get("_delete"):
+                (request.cwd / out.pop("_delete")).unlink()
         elif self.role == "worker":
             out = default_worker_output(request)
         else:

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import traceback
 
-from orchestrator.intake.base import TaskSpec
+from orchestrator.intake.base import TaskSpec, cyclic_keys
 from orchestrator.pipeline import stages
 from orchestrator.pipeline.runtime import Runtime
 from orchestrator.pipeline.task import Blocked, Failed, TaskState
@@ -69,9 +69,23 @@ async def run_all(
         rt.store.save_task(rt.run_id, state)
     sem = asyncio.Semaphore(rt.cfg.scheduler.max_parallel)
     done_events = {k: asyncio.Event() for k in tasks}
+    # a dependency cycle would wait forever; its members are blocked before anything starts
+    unrunnable = set(cyclic_keys(specs))
+    for key in unrunnable:
+        task = tasks[key]
+        if not task.terminal:
+            task.outcome = "blocked"
+            task.error = "dependency cycle among: " + ", ".join(sorted(unrunnable))
+            task.transition("BLOCKED")
+            rt.store.save_task(rt.run_id, task)
+            rt.audit.record("blocked", key, reason="dependency-cycle", members=sorted(unrunnable))
+        done_events[key].set()
 
     async def one(spec: TaskSpec) -> TaskState:
         task = tasks[spec.key]
+        if task.terminal:
+            done_events[spec.key].set()
+            return task
         for dep in spec.depends_on:
             if dep in done_events:
                 await done_events[dep].wait()
@@ -82,9 +96,6 @@ async def run_all(
                     rt.store.save_task(rt.run_id, task)
                     done_events[spec.key].set()
                     return task
-        if task.terminal:
-            done_events[spec.key].set()
-            return task
         async with sem:
             try:
                 return await run_task(rt, spec, task)

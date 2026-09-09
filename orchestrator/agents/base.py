@@ -154,11 +154,11 @@ async def run_process(
         )
     except TimeoutError:
         timed_out = True
-        _kill_group(proc.pid)
-        try:
-            out_b, err_b = await asyncio.wait_for(proc.communicate(), timeout=10)
-        except TimeoutError:
-            out_b, err_b = b"", b""
+        out_b, err_b = await _terminate(proc)
+    except asyncio.CancelledError:
+        # the caller is being cancelled: the child must not outlive the orchestrator
+        await _terminate(proc)
+        raise
     stdout = out_b.decode(errors="replace")
     stderr = err_b.decode(errors="replace")
     if stdout_path:
@@ -168,9 +168,24 @@ async def run_process(
     return ProcessOutcome(proc.returncode, stdout, stderr, timed_out)
 
 
-def _kill_group(pid: int) -> None:
+async def _terminate(proc: asyncio.subprocess.Process) -> tuple[bytes, bytes]:
+    """SIGTERM the process group, escalate to SIGKILL, and reap; returns whatever output remains."""
+    _kill_group(proc.pid, signal.SIGTERM)
     try:
-        os.killpg(os.getpgid(pid), signal.SIGTERM)
+        return await asyncio.shield(asyncio.wait_for(proc.communicate(), timeout=10))
+    except (TimeoutError, asyncio.CancelledError):
+        pass
+    _kill_group(proc.pid, signal.SIGKILL)
+    try:
+        await asyncio.shield(asyncio.wait_for(proc.wait(), timeout=5))
+    except (TimeoutError, asyncio.CancelledError):
+        pass
+    return b"", b""
+
+
+def _kill_group(pid: int, sig: int) -> None:
+    try:
+        os.killpg(os.getpgid(pid), sig)
     except ProcessLookupError:
         return
     except PermissionError:

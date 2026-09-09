@@ -34,6 +34,12 @@ class Worktree:
     path: Path
     branch: str
     base: str
+    base_sha: str | None = None
+    """The commit the branch was created from. `origin/<base>` keeps moving; this does not."""
+
+    @property
+    def base_ref(self) -> str:
+        return self.base_sha or f"origin/{self.base}"
 
 
 class WorktreeManager:
@@ -76,24 +82,25 @@ class WorktreeManager:
         if ".orchestrator/" not in existing_lines:
             with exclude.open("a") as f:
                 f.write("\n.orchestrator/\n")
-        return Worktree(path=path, branch=branch, base=self.repo.base_branch)
+        base_sha = (await git("rev-parse", "HEAD", cwd=path)).out.strip()
+        return Worktree(path=path, branch=branch, base=self.repo.base_branch, base_sha=base_sha)
 
-    async def existing(self, key: str) -> Worktree | None:
+    async def existing(self, key: str, base_sha: str | None = None) -> Worktree | None:
         path = self.root / key
         if not path.exists():
             return None
         res = await git("rev-parse", "--abbrev-ref", "HEAD", cwd=path, check=False)
         if res.code != 0:
             return None
-        return Worktree(path=path, branch=res.out.strip(), base=self.repo.base_branch)
+        return Worktree(path=path, branch=res.out.strip(), base=self.repo.base_branch, base_sha=base_sha)
 
     async def changed_paths(self, wt: Worktree) -> list[str]:
         await git("add", "-A", "--intent-to-add", cwd=wt.path, check=False)
-        res = await git("diff", "--name-only", f"origin/{wt.base}", cwd=wt.path)
+        res = await git("diff", "--name-only", wt.base_ref, cwd=wt.path)
         return [p for p in res.out.splitlines() if p.strip()]
 
     async def diff(self, wt: Worktree) -> str:
-        res = await git("diff", f"origin/{wt.base}", cwd=wt.path)
+        res = await git("diff", wt.base_ref, cwd=wt.path)
         return res.out
 
     async def _filter_staged(self, wt: Worktree) -> list[str]:
@@ -118,11 +125,16 @@ class WorktreeManager:
 
     async def stage_all(self, wt: Worktree) -> list[str]:
         """Fold agent commits back into the index and stage the working tree. Returns excluded paths."""
-        await git("reset", "--soft", f"origin/{wt.base}", cwd=wt.path)
+        await git("reset", "--soft", wt.base_ref, cwd=wt.path)
         await git("add", "-A", cwd=wt.path)
         return await self._filter_staged(wt)
 
+    async def has_staged_changes(self, wt: Worktree) -> bool:
+        res = await git("diff", "--cached", "--quiet", cwd=wt.path, check=False)
+        return res.code != 0
+
     async def staged_files(self, wt: Worktree) -> list[str]:
+        """Staged paths that still exist, which is what hooks can be run on; deletions are omitted."""
         res = await git("diff", "--cached", "--name-only", "--diff-filter=ACMR", cwd=wt.path)
         return [p for p in res.out.splitlines() if p.strip()]
 

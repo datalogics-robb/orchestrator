@@ -9,10 +9,15 @@ from pathlib import Path
 import pytest
 
 from orchestrator.config.loader import load_config
-from orchestrator.intake.base import ExplicitKeys
+from orchestrator.intake.base import ExplicitKeys, TaskSpec
 from orchestrator.pipeline.runtime import build_runtime
 from orchestrator.pipeline.scheduler import run_all
+from orchestrator.scm.worktree import WorktreeManager
 from tests import fakes
+
+
+def _git(*args: str, cwd: Path) -> str:
+    return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, check=True).stdout
 
 
 async def _run(config_path: Path, tracker: fakes.FakeTracker, keys: list[str]):
@@ -273,3 +278,72 @@ async def test_pre_commit_failure_becomes_a_fix_round(config_path: Path) -> None
     assert task.round == 1
     assert "Pre-commit hooks failed" in fakes.CALLS["worker"][1].prompt
     assert "fake-hook" in fakes.CALLS["worker"][1].prompt
+
+
+async def test_moving_base_does_not_stage_reverts_of_upstream(
+    config_path: Path, git_repo: tuple[Path, Path], tmp_path: Path
+) -> None:
+    origin, _clone = git_repo
+    cfg = load_config(config_path)
+    manager = WorktreeManager(cfg.repo)
+    wt = await manager.create("PROJ-7", "Do the thing")
+    assert wt.base_sha == _git("rev-parse", "HEAD", cwd=wt.path).strip()
+    # upstream moves while this worktree is busy, and another worktree's fetch picks it up
+    other = tmp_path / "other"
+    _git("clone", "-q", str(origin), str(other), cwd=tmp_path)
+    _git("config", "user.email", "t@example.com", cwd=other)
+    _git("config", "user.name", "Test", cwd=other)
+    (other / "upstream.txt").write_text("landed after the worktree was created\n")
+    _git("add", "upstream.txt", cwd=other)
+    _git("-c", "commit.gpgsign=false", "commit", "-q", "-m", "upstream", cwd=other)
+    _git("push", "-q", "origin", "develop", cwd=other)
+    await manager.fetch_base()
+    # nothing changed in the worktree: nothing to commit, and no deletion of upstream.txt
+    assert await manager.stage_all(wt) == []
+    assert not await manager.has_staged_changes(wt)
+    (wt.path / "mine.txt").write_text("my change\n")
+    await manager.stage_all(wt)
+    assert await manager.staged_files(wt) == ["mine.txt"]
+    status = _git("diff", "--cached", "--name-status", cwd=wt.path)
+    assert "upstream.txt" not in status
+    assert await manager.changed_paths(wt) == ["mine.txt"]
+
+
+@pytest.mark.usefixtures("fake_runners")
+async def test_deletion_only_change_is_committed(config_path: Path) -> None:
+    fakes.SCRIPT["worker"].append(
+        {
+            "_delete": "README.md",
+            "status": "completed",
+            "summary": "Removed the stale README.",
+            "changed_paths": ["README.md"],
+            "tests_selected": ["python3 -c pass"],
+            "test_rationale": "nothing to run",
+        }
+    )
+    tracker = fakes.FakeTracker({"PROJ-2": fakes.issue("PROJ-2")})
+    _rt, results = await _run(config_path, tracker, ["PROJ-2"])
+    task = results[0]
+    assert task.state == "DONE", task.error
+    show = _git("show", "--name-status", "--format=", "HEAD", cwd=Path(task.worktree_path))
+    assert show.split() == ["D", "README.md"]
+
+
+@pytest.mark.usefixtures("fake_runners")
+async def test_dependency_cycle_blocks_its_members_instead_of_hanging(config_path: Path) -> None:
+    cfg = load_config(config_path)
+    tracker = fakes.FakeTracker({k: fakes.issue(k) for k in ["PROJ-1", "PROJ-2", "PROJ-3", "PROJ-4"]})
+    rt = build_runtime(cfg, config_path, dry_run=True, keep_worktrees=True, tracker=tracker)
+    rt.store.create_run(rt.run_id, config_path, ["PROJ-1", "PROJ-2", "PROJ-3", "PROJ-4"], True)
+    specs = [
+        TaskSpec(await tracker.get_issue("PROJ-4"), []),
+        TaskSpec(await tracker.get_issue("PROJ-1"), ["PROJ-2"]),
+        TaskSpec(await tracker.get_issue("PROJ-2"), ["PROJ-1"]),
+        TaskSpec(await tracker.get_issue("PROJ-3"), ["PROJ-2"]),
+    ]
+    results = {t.key: t for t in await run_all(rt, specs)}
+    assert results["PROJ-4"].state == "DONE", results["PROJ-4"].error
+    for key in ["PROJ-1", "PROJ-2", "PROJ-3"]:
+        assert results[key].state == "BLOCKED"
+        assert "dependency cycle" in (results[key].error or "")
+    assert fakes.CALLS["worker"] and all(r.cwd.name == "PROJ-4" for r in fakes.CALLS["worker"])

@@ -41,6 +41,7 @@ class TaskState:
     outcome: Literal["completed", "blocked", "failed", ""] = ""
     branch: str | None = None
     worktree_path: str | None = None
+    base_sha: str | None = None
     worker_session: str | None = None
     reviewer_session: str | None = None
     commit_sha: str | None = None

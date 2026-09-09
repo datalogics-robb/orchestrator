@@ -292,7 +292,9 @@ pipeline is unchanged.
   hooks, and by the helper.
 - **Copy helper.** The orchestrator places a small `orchestrator-cp` command on the agent's
   `PATH`. It accepts `<share>:<relative path>` arguments, resolves them against the grants,
-  refuses symlink escapes and paths outside a write root, preserves file metadata, and
+  refuses symlink escapes and paths outside a write root (on the source side and on every
+  destination path, after following any symlink already present there), preserves file
+  metadata, and
   appends source, destination, size, and hash of every file to the audit log. The worker
   prompt says to use it for share-to-share copies. Raw `cp` and `rsync` are not blocked
   where the adapter cannot distinguish them, but the helper is what the audit trail is
@@ -503,7 +505,10 @@ Validation rules enforced by the loader:
 ### 6.2 Worktree
 
 - `git fetch origin <base>` under a per-repo lock, then
-  `git worktree add <root>/<key> -b <branch> origin/<base>`.
+  `git worktree add <root>/<key> -b <branch> origin/<base>`. The commit the branch started
+  from is recorded on the task as `base_sha`; every later diff, squash, and reset uses that
+  SHA, never the moving `origin/<base>`, so a fetch made for another worktree cannot turn
+  upstream commits into staged reversions here.
 - Run `build.setup` and `hooks.after_worktree`.
 - Worktrees are kept after `BLOCKED` or `FAILED` for inspection and removed after `DONE`
   unless `--keep-worktrees` is passed. `orchestrator clean` prunes by age.
@@ -527,7 +532,7 @@ Validation rules enforced by the loader:
 - Build commands run under the global build semaphore with the configured timeout, in a
   scrubbed environment (section 7.2) plus the declared `build.env`.
 - Test selection per strategy:
-  - `changed-paths`: match `git diff --name-only origin/<base>` against the map; dedupe;
+  - `changed-paths`: match `git diff --name-only <base_sha>` against the map; dedupe;
     cap at `max_commands`; use `fallback` if nothing matches.
   - `named-suite`: always run the listed commands.
   - `agent-chosen`: the worker's `tests_selected` is validated against an allowlist of
