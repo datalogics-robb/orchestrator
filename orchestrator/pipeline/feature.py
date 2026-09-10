@@ -166,10 +166,9 @@ async def stage_test_writing(rt: Runtime, spec: TaskSpec, task: TaskState) -> St
     """Red: the tests from the specification plus the smallest interface that lets them compile and fail."""
     wt = stages._worktree(rt, task)
     _write_spec_context(rt, task)
-    rr = rt.role("worker")
     ctx = stages._prompt_common(rt, spec, task, wt, "worker")
     ctx["fix_reason"] = task.fix_reason or ""
-    ctx["resumed"] = bool(task.fix_reason and task.worker_session and rr.runner.capabilities.session_resume)
+    ctx["resumed"] = stages._worker_resumes(rt, task, wants=bool(task.fix_reason))
     ctx["require_red"] = rt.cfg.workflows.feature.require_red
     prompt = rt.render("red.md", **ctx)
     result_model: WorkerResult
@@ -353,13 +352,12 @@ def red_markdown(task: TaskState) -> str:
 async def stage_implement(rt: Runtime, spec: TaskSpec, task: TaskState) -> State:
     """Green: implement the specification so the red tests pass, without weakening them."""
     wt = stages._worktree(rt, task)
-    rr = rt.role("worker")
     ctx = stages._prompt_common(rt, spec, task, wt, "worker")
     ctx.update(
         red_tests=[shlex.join(c) for c in task.red_tests],
         red_evidence=task.red_evidence,
         previous_summary=(task.worker_result or {}).get("summary", ""),
-        resumed=bool(task.worker_session and rr.runner.capabilities.session_resume),
+        resumed=stages._worker_resumes(rt, task, wants=True),
     )
     prompt = rt.render("green.md", **ctx)
     result_model: WorkerResult

@@ -32,13 +32,19 @@ class JiraTracker:
         await self._client.aclose()
 
     async def _get(self, path: str, **params: Any) -> Any:
-        r = await self._client.get(path, params=params)
+        try:
+            r = await self._client.get(path, params=params)
+        except httpx.HTTPError as e:
+            raise TrackerError(f"GET {path}: {e.__class__.__name__}: {e}") from e
         if r.status_code >= 400:
             raise TrackerError(f"GET {path}: {r.status_code} {r.text[:300]}")
         return r.json()
 
     async def _post(self, path: str, json: Any, ok: tuple[int, ...] = (200, 201, 204)) -> Any:
-        r = await self._client.post(path, json=json)
+        try:
+            r = await self._client.post(path, json=json)
+        except httpx.HTTPError as e:
+            raise TrackerError(f"POST {path}: {e.__class__.__name__}: {e}") from e
         if r.status_code not in ok:
             raise TrackerError(f"POST {path}: {r.status_code} {r.text[:300]}")
         return r.json() if r.content else None
@@ -140,23 +146,29 @@ class JiraTracker:
         raise TrackerError(f"{key}: no transition to '{to_status}'; available: {names}")
 
     async def attach(self, key: str, path: Path) -> None:
-        with path.open("rb") as f:
-            r = await self._client.post(
-                f"/rest/api/3/issue/{key}/attachments",
-                files={"file": (path.name, f)},
-                headers={"X-Atlassian-Token": "no-check"},
-            )
+        try:
+            with path.open("rb") as f:
+                r = await self._client.post(
+                    f"/rest/api/3/issue/{key}/attachments",
+                    files={"file": (path.name, f)},
+                    headers={"X-Atlassian-Token": "no-check"},
+                )
+        except httpx.HTTPError as e:
+            raise TrackerError(f"attach {path.name} to {key}: {e.__class__.__name__}: {e}") from e
         if r.status_code >= 400:
             raise TrackerError(f"attach {path.name} to {key}: {r.status_code} {r.text[:300]}")
 
     async def download_attachment(self, attachment: Attachment, dest: Path) -> None:
-        async with self._client.stream("GET", attachment.url, follow_redirects=True) as r:
-            if r.status_code >= 400:
-                raise TrackerError(f"download {attachment.filename}: {r.status_code}")
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            with dest.open("wb") as f:
-                async for chunk in r.aiter_bytes():
-                    f.write(chunk)
+        try:
+            async with self._client.stream("GET", attachment.url, follow_redirects=True) as r:
+                if r.status_code >= 400:
+                    raise TrackerError(f"download {attachment.filename}: {r.status_code}")
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                with dest.open("wb") as f:
+                    async for chunk in r.aiter_bytes():
+                        f.write(chunk)
+        except httpx.HTTPError as e:
+            raise TrackerError(f"download {attachment.filename}: {e.__class__.__name__}: {e}") from e
 
     async def check(self) -> list[str]:
         problems = []

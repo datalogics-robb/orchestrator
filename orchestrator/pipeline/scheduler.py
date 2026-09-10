@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import traceback
+from collections.abc import Awaitable
 
 from orchestrator.intake.base import TaskSpec, cyclic_keys
 from orchestrator.pipeline import feature, stages
@@ -11,6 +12,15 @@ from orchestrator.pipeline.runtime import Runtime
 from orchestrator.pipeline.task import Blocked, Failed, TaskState, Workflow
 
 STAGES = {**stages.STAGES, **feature.STAGES}
+
+
+async def _report(rt: Runtime, task: TaskState, handler: Awaitable[None]) -> None:
+    """Reporting a terminal outcome (Jira, Confluence) must never take the run down with it."""
+    try:
+        await handler
+    except Exception as e:  # noqa: BLE001
+        rt.audit.record("report_error", task.key, error=repr(e))
+        task.error = (task.error + "\n" if task.error else "") + f"reporting failed: {e!r}"
 
 
 async def run_task(rt: Runtime, spec: TaskSpec, task: TaskState) -> TaskState:
@@ -34,20 +44,22 @@ async def run_task(rt: Runtime, spec: TaskSpec, task: TaskState) -> TaskState:
             task.transition(next_state)
         except Blocked as b:
             rt.audit.record("blocked", task.key, reason=b.reason)
-            await stages.handle_blocked(rt, spec, task, b)
+            await _report(rt, task, stages.handle_blocked(rt, spec, task, b))
             task.transition("BLOCKED")
         except Failed as f:
             attempts += 1
             if f.transient and attempts <= rt.cfg.scheduler.retry_infra_failures:
                 rt.audit.record("retry", task.key, state=task.state, attempt=attempts, error=str(f))
-                await asyncio.sleep(min(30, 5 * attempts))
+                rt.store.save_task(rt.run_id, task)
+                await asyncio.sleep(min(300, rt.cfg.scheduler.retry_backoff_seconds * attempts))
                 continue
             rt.audit.record("failed", task.key, state=task.state, error=str(f))
-            await stages.handle_failed(rt, spec, task, f)
+            await _report(rt, task, stages.handle_failed(rt, spec, task, f))
             task.transition("FAILED")
         except Exception as e:  # noqa: BLE001
             rt.audit.record("failed", task.key, state=task.state, error=repr(e), trace=traceback.format_exc())
-            await stages.handle_failed(rt, spec, task, Failed(f"unexpected error in {task.state}: {e!r}"))
+            failed = Failed(f"unexpected error in {task.state}: {e!r}")
+            await _report(rt, task, stages.handle_failed(rt, spec, task, failed))
             task.transition("FAILED")
         rt.store.save_task(rt.run_id, task)
     if task.paused:

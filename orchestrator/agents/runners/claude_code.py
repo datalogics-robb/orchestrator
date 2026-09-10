@@ -153,24 +153,44 @@ class ClaudeCodeRunner:
                 stderr_tail=tail(outcome.stderr),
                 error="claude did not return JSON",
             )
-        subtype = data.get("subtype", "")
-        termination = {
-            "success": "completed",
-            "error_max_turns": "max_turns",
-            "error_max_budget_usd": "max_budget",
-            "error_max_structured_output_retries": "schema",
-        }.get(subtype, "error")
-        ok = subtype == "success" and not data.get("is_error", False)
-        return AgentResult(
-            ok=ok,
-            termination=termination,  # type: ignore[arg-type]
-            raw_text=data.get("result") or "",
-            structured_output=data.get("structured_output"),
-            session_id=data.get("session_id"),
-            cost_usd=data.get("total_cost_usd"),
-            num_turns=data.get("num_turns"),
-            usage=data.get("usage") or {},
-            exit_code=outcome.exit_code,
-            stderr_tail=tail(outcome.stderr),
-            error=None if ok else "; ".join(data.get("errors") or [subtype or "unknown error"]),
-        )
+        return result_from_output(data, exit_code=outcome.exit_code, stderr_tail=tail(outcome.stderr))
+
+
+def result_from_output(data: dict, *, exit_code: int | None, stderr_tail: str = "") -> AgentResult:
+    """Map the CLI's final `result` object onto an AgentResult.
+
+    `subtype` names the stop reason. The CLI reports an API or network failure mid-run as
+    `subtype: success` with `is_error: true` and the message in `result`; that is a runtime error,
+    not a completion, and the session is resumable.
+    """
+    subtype = data.get("subtype", "")
+    termination = {
+        "success": "completed",
+        "error_max_turns": "max_turns",
+        "error_max_budget_usd": "max_budget",
+        "error_max_structured_output_retries": "schema",
+    }.get(subtype, "error")
+    ok = subtype == "success" and not data.get("is_error", False)
+    if not ok and termination == "completed":
+        termination = "error"
+    error = None
+    if not ok:
+        reasons = list(data.get("errors") or [])
+        if data.get("terminal_reason") and data["terminal_reason"] != "success":
+            reasons.append(str(data["terminal_reason"]))
+        if data.get("is_error") and data.get("result"):
+            reasons.append(str(data["result"]))
+        error = "; ".join(reasons) or subtype or "unknown error"
+    return AgentResult(
+        ok=ok,
+        termination=termination,  # type: ignore[arg-type]
+        raw_text=data.get("result") or "",
+        structured_output=data.get("structured_output"),
+        session_id=data.get("session_id"),
+        cost_usd=data.get("total_cost_usd"),
+        num_turns=data.get("num_turns"),
+        usage=data.get("usage") or {},
+        exit_code=exit_code,
+        stderr_tail=stderr_tail,
+        error=error,
+    )

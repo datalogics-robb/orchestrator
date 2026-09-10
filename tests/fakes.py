@@ -78,6 +78,15 @@ class _Fake:
         CALLS[self.role].append(request)
         if SCRIPT[self.role]:
             out = SCRIPT[self.role].pop(0)
+            if out.get("_error"):
+                # the runtime died under the agent: no output, but a resumable session
+                return AgentResult(
+                    False,
+                    "error",
+                    raw_text=out["_error"],
+                    session_id=f"{self.role}-session",
+                    error=out["_error"],
+                )
             if out.get("_write"):
                 (request.cwd / "agent_change.txt").write_text(out.pop("_write"))
             if out.get("_touch"):

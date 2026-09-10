@@ -225,7 +225,15 @@ async def _agent_with_contract(
     if result.termination in ("max_turns", "max_budget"):
         raise Failed(f"{role} hit its {result.termination.replace('_', ' ')} limit")
     if not result.ok and result.structured_output is None:
+        if result.termination == "error" and result.session_id and role == "worker":
+            # the runtime died under the agent (API, network); the session is resumable, so retry it
+            task.worker_session = result.session_id
+            task.interrupted = f"{kwargs['label']}: {result.error or 'runtime error'}"
+            rt.audit.record("interrupted", task.key, role=role, label=kwargs["label"], error=result.error)
+            raise Failed(f"{role} runtime failed mid-session: {result.error}", transient=True)
         raise Failed(f"{role} failed: {result.error or result.termination}\n{result.stderr_tail}")
+    if role == "worker":
+        task.interrupted = None
     try:
         return parse(result.structured_output or {}), result
     except ContractError as e:
@@ -382,11 +390,19 @@ def _prompt_common(rt: Runtime, spec: TaskSpec, task: TaskState, wt: Worktree, r
         "workflow": task.workflow,
         "spec_md": spec_markdown(task, with_review=False) if task.spec else "",
         "decisions": task.decisions,
+        "interrupted": task.interrupted or "",
     }
+
+
+def _worker_resumes(rt: Runtime, task: TaskState, *, wants: bool) -> bool:
+    """Whether the next worker call continues the stored session: after an interruption, or when the stage asks."""
+    can = bool(task.worker_session and rt.role("worker").runner.capabilities.session_resume)
+    return can and (wants or bool(task.interrupted))
 
 
 async def stage_work(rt: Runtime, spec: TaskSpec, task: TaskState) -> State:
     wt = _worktree(rt, task)
+    resumed = _worker_resumes(rt, task, wants=False)
     prompt = rt.render("worker.md", **_prompt_common(rt, spec, task, wt, "worker"))
     result_model: WorkerResult
     result_model, result = await _agent_with_contract(
@@ -397,7 +413,7 @@ async def stage_work(rt: Runtime, spec: TaskSpec, task: TaskState) -> State:
         cwd=wt.path,
         prompt=prompt,
         schema=WORKER_SCHEMA,
-        session=None,
+        session=task.worker_session if resumed else None,
         label="worker",
     )
     task.worker_session = result.session_id
@@ -416,11 +432,10 @@ async def stage_work(rt: Runtime, spec: TaskSpec, task: TaskState) -> State:
 
 async def stage_fix(rt: Runtime, spec: TaskSpec, task: TaskState) -> State:
     wt = _worktree(rt, task)
-    rr = rt.role("worker")
     ctx = _prompt_common(rt, spec, task, wt, "worker")
     ctx["fix_reason"] = task.fix_reason or ""
     ctx["previous_summary"] = (task.worker_result or {}).get("summary", "")
-    ctx["resumed"] = bool(task.worker_session and rr.runner.capabilities.session_resume)
+    ctx["resumed"] = _worker_resumes(rt, task, wants=True)
     prompt = rt.render("fixer.md", **ctx)
     result_model, result = await _agent_with_contract(
         rt,
@@ -430,7 +445,7 @@ async def stage_fix(rt: Runtime, spec: TaskSpec, task: TaskState) -> State:
         cwd=wt.path,
         prompt=prompt,
         schema=WORKER_SCHEMA,
-        session=task.worker_session,
+        session=task.worker_session if ctx["resumed"] else None,
         label=f"fix-{task.round}",
     )
     task.worker_session = result.session_id or task.worker_session

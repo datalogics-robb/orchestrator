@@ -336,6 +336,11 @@ class SchedulerConfig(StrictModel):
     retry_infra_failures: int = Field(
         2, description="Retries for transient infrastructure errors such as git or network failures."
     )
+    retry_backoff_seconds: int = Field(
+        60,
+        description="Wait before the first retry; doubles per attempt and is capped at five minutes. "
+        "Network and API outages usually need minutes to clear.",
+    )
 
 
 class CommitConfig(StrictModel):

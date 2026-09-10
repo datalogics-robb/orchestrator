@@ -579,3 +579,18 @@ async def test_feature_pauses_after_red_when_configured(
         _git("log", "--format=%s", "origin/develop..HEAD", cwd=Path(task.worktree_path)).strip().splitlines()
     )
     assert len(log) == 2 and log[1].endswith("(red)") and log[0].endswith("(green)")
+
+
+@pytest.mark.usefixtures("fake_runners")
+async def test_worker_runtime_failure_resumes_the_same_session(config_path: Path) -> None:
+    fakes.SCRIPT["worker"].append({"_error": "API Error: Can't reach the API server (ENOTFOUND)"})
+    tracker = fakes.FakeTracker({"PROJ-13": fakes.issue("PROJ-13")})
+    rt, results = await _run(config_path, tracker, ["PROJ-13"])
+    task = results[0]
+    assert task.state == "DONE", task.error
+    assert task.interrupted is None
+    first, second = fakes.CALLS["worker"][0], fakes.CALLS["worker"][1]
+    assert first.session is None and second.session == "worker-session"
+    assert "previous session was interrupted" in second.prompt and "ENOTFOUND" in second.prompt
+    events = [json.loads(line)["event"] for line in rt.audit.path.read_text().splitlines()]
+    assert "interrupted" in events and "retry" in events

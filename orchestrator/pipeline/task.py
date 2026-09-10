@@ -68,6 +68,9 @@ class TaskState:
     """Feature workflow: excerpt of the failing test output that proved the tests were red."""
     red_tests: list[list[str]] = field(default_factory=list)
     """Feature workflow: the commands that were red; every later test stage runs them first."""
+    interrupted: str | None = None
+    """Set when the worker's runtime died mid-session (API or network failure); the next attempt
+    resumes that session instead of starting over, and the prompt says so."""
     worker_session: str | None = None
     reviewer_session: str | None = None
     commit_sha: str | None = None

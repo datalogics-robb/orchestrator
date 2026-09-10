@@ -19,6 +19,11 @@ The change did not pass validation. Address everything below, then rebuild and r
 The specification is in `.orchestrator/context/spec.md`{% if decisions %} and the approver's decisions in `.orchestrator/context/decisions.md`{% endif %}. Fix the findings within it. Do not weaken the red tests to get green; if a test itself is wrong, fix it and say why in your summary.
 {% endif %}
 
+{% if interrupted %}
+## Your previous session was interrupted
+
+The runtime running you failed part-way through (`{{ interrupted }}`); this is the same session, resumed. Everything you wrote is still in the worktree. Check where you left off with `git status` and your own notes, finish the remaining work, and reply with the JSON object. Do not start over.
+{% endif %}
 ## Boundaries
 
 Same as before: work only in the worktree and granted shares, do not run {% for d in deny_commands %}`{{ d }}`{% if not loop.last %}, {% endif %}{% endfor %}, keep the change focused on the issue, and use `orchestrator-cp` for any share copies.

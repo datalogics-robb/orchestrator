@@ -121,7 +121,7 @@ def config_dict(git_repo: tuple[Path, Path], shares: tuple[Path, Path], tmp_path
                 "timeout_minutes": 1,
             },
         },
-        "scheduler": {"max_parallel": 2},
+        "scheduler": {"max_parallel": 2, "retry_backoff_seconds": 0},
     }
 
 

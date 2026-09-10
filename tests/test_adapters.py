@@ -149,3 +149,36 @@ def test_hermes_config_and_argv(tmp_path: Path) -> None:
     assert argv[:3] == ["hermes", "-z", "PROMPT"] and "--yolo" in argv
     assert argv[argv.index("--provider") + 1] == "anthropic"
     assert argv[argv.index("--in") + 1] == str(req.cwd)
+
+
+def test_claude_result_mapping_treats_api_error_as_runtime_error() -> None:
+    from orchestrator.agents.runners.claude_code import result_from_output
+
+    died = result_from_output(
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": True,
+            "terminal_reason": "api_error",
+            "result": "API Error: Can't reach the API server (ENOTFOUND)",
+            "session_id": "s-1",
+            "total_cost_usd": 1.5,
+            "num_turns": 9,
+        },
+        exit_code=1,
+    )
+    assert not died.ok and died.termination == "error" and died.session_id == "s-1"
+    assert "api_error" in (died.error or "") and "ENOTFOUND" in (died.error or "")
+    fine = result_from_output(
+        {
+            "subtype": "success",
+            "is_error": False,
+            "result": "{}",
+            "structured_output": {"a": 1},
+            "session_id": "s-2",
+        },
+        exit_code=0,
+    )
+    assert fine.ok and fine.termination == "completed" and fine.error is None
+    turns = result_from_output({"subtype": "error_max_turns", "is_error": True}, exit_code=1)
+    assert turns.termination == "max_turns" and turns.error == "error_max_turns"
