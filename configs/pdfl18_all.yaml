@@ -106,6 +106,7 @@ workflows:
     require_approval: true
     spec_review: true
     require_red: true
+    pause_after_red: true                # a person inspects the committed tests and inputs before the implementation
     # DevTests exit codes: 50 Failure is a real red; 55 ResourceProblem, 18 RequiresPlugin, and a
     # missing input are not. ctest prints "(Failed)" for all of them, so the output text decides.
     red_reject_patterns:

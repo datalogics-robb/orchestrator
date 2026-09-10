@@ -136,20 +136,25 @@ async def stage_specify(rt: Runtime, spec: TaskSpec, task: TaskState) -> State:
 
 
 def approve(task: TaskState, decisions: str) -> None:
-    """A person accepted the specification; any text they add is binding on the worker."""
+    """A person accepted the specification (or, at RED_REVIEW, the failing tests); their text binds the worker."""
     if not task.paused:
         raise ValueError(f"{task.key} is {task.state}, not awaiting approval")
     if decisions.strip():
         task.decisions = (task.decisions + "\n\n" if task.decisions else "") + decisions.strip()
-    task.transition("TEST_WRITING")
+    task.transition("IMPLEMENTING" if task.state == "RED_REVIEW" else "TEST_WRITING")
 
 
 def revise(task: TaskState, decisions: str, max_revisions: int) -> None:
-    """A person sent the specification back with instructions; the worker rewrites it."""
+    """A person sent the specification, or the red tests, back with instructions."""
     if not task.paused:
         raise ValueError(f"{task.key} is {task.state}, not awaiting approval")
     if not decisions.strip():
         raise ValueError("--revise needs --decisions with what to change")
+    if task.state == "RED_REVIEW":
+        # the tests are rewritten on top of the red commit; the next red commit replaces it
+        task.fix_reason = "## The approver sent the tests back\n\n" + decisions.strip()
+        task.transition("TEST_WRITING")
+        return
     if task.spec_revision >= max_revisions:
         raise ValueError(f"{task.key} has used all {max_revisions} specification revisions")
     task.spec_revision += 1
@@ -272,6 +277,7 @@ async def stage_red_check(rt: Runtime, spec: TaskSpec, task: TaskState) -> State
     summary = (task.worker_result or {}).get("summary") or "Tests for the specification."
     message = stages.commit_message(rt, spec, task, summary, phase="red")
     try:
+        # a rewritten red replaces the previous red commit rather than stacking on it
         excluded = await rt.worktrees.stage_all(wt)
         has_changes = await rt.worktrees.has_staged_changes(wt)
         files = await rt.worktrees.staged_files(wt)
@@ -300,10 +306,48 @@ async def stage_red_check(rt: Runtime, spec: TaskSpec, task: TaskState) -> State
         raise Failed(f"red commit: {e}") from e
     if sha is None:
         return _red_retry(rt, task, "## Nothing remained to commit after the hooks ran.", "red-empty")
-    task.phase_commits.append(sha)
+    task.phase_commits = [sha]
     task.red_tests = commands
     rt.audit.record("red_commit", task.key, sha=sha, tests=commands, round=task.round)
+    if cfg.pause_after_red:
+        red_md = red_markdown(task)
+        (rt.task_dir(task.key) / "red.md").write_text(red_md)
+        comment = (
+            f"Agent run {rt.run_id} committed the failing tests for {task.key} ({sha[:10]}); see the attached "
+            f"red.md. Approve them with `orchestrator resume {rt.run_id} --approve {task.key}` to start the "
+            f"implementation, or send them back with `--revise {task.key} --decisions FILE`."
+        )
+        await stages._jira_writeback(
+            rt, task, comment=comment, status=None, attach=rt.task_dir(task.key) / "red.md"
+        )
+        return "RED_REVIEW"
     return "IMPLEMENTING"
+
+
+def red_markdown(task: TaskState) -> str:
+    """What a person reviews at RED_REVIEW: the tests, the inputs, and the proof they fail."""
+    worker = task.worker_result or {}
+    lines = [
+        f"# {task.key}: failing tests committed (red)",
+        "",
+        f"Commit: `{task.phase_commits[-1] if task.phase_commits else ''}`  ",
+        f"Branch: `{task.branch}`  ",
+        f"Worktree: `{task.worktree_path}`",
+        "",
+        "## What the worker reports",
+        "",
+        worker.get("summary", ""),
+        "",
+    ]
+    if worker.get("test_rationale"):
+        lines += [worker["test_rationale"], ""]
+    lines += ["## Changed paths", ""] + [f"- `{p}`" for p in worker.get("changed_paths", [])] + [""]
+    if worker.get("copied_files"):
+        lines += ["## Files staged on the shares", ""]
+        lines += [f"- `{c['from']}` -> `{c['to']}`" for c in worker["copied_files"]] + [""]
+    lines += ["## Test commands", ""] + [f"- `{shlex.join(c)}`" for c in task.red_tests] + [""]
+    lines += ["## Failing output before the implementation", "", "```", task.red_evidence, "```", ""]
+    return "\n".join(lines)
 
 
 async def stage_implement(rt: Runtime, spec: TaskSpec, task: TaskState) -> State:

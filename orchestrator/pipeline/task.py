@@ -12,6 +12,7 @@ State = Literal[
     "WORKTREE",
     "SPECIFYING",
     "AWAITING_APPROVAL",
+    "RED_REVIEW",
     "TEST_WRITING",
     "RED_CHECK",
     "IMPLEMENTING",
@@ -30,8 +31,11 @@ State = Literal[
 ]
 
 TERMINAL: frozenset[str] = frozenset({"DONE", "BLOCKED", "FAILED"})
-PAUSED: frozenset[str] = frozenset({"AWAITING_APPROVAL"})
-"""States where the task waits for a person; `resume --approve` or `--revise` moves it on."""
+PAUSED: frozenset[str] = frozenset({"AWAITING_APPROVAL", "RED_REVIEW"})
+"""States where the task waits for a person; `resume --approve` or `--revise` moves it on.
+
+AWAITING_APPROVAL: the specification is written. RED_REVIEW: the failing tests are committed.
+"""
 
 Workflow = Literal["bugfix", "feature"]
 

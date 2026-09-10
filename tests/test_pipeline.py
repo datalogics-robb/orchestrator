@@ -529,3 +529,53 @@ async def test_workflow_routing_and_override(config_path: Path, config_dict: dic
     specs = await ExplicitKeys(tracker, ["PROJ-11"]).tasks()
     results = await run_all(rt, specs, workflow="feature")
     assert results[0].workflow == "feature" and results[0].state == "AWAITING_APPROVAL"
+
+
+@pytest.mark.usefixtures("fake_runners")
+async def test_feature_pauses_after_red_when_configured(
+    config_path: Path, config_dict: dict, tmp_path: Path
+) -> None:
+    from orchestrator.pipeline import feature
+
+    _feature_config(config_dict, config_path, require_approval=False, spec_review=False, pause_after_red=True)
+    flag = tmp_path / "frob.implemented"
+    red_cmd = _failing_until(flag)
+    base = {"status": "completed", "changed_paths": ["agent_change.txt"], "test_rationale": ""}
+    fakes.SCRIPT["worker"].extend(
+        [
+            SPEC,
+            {**base, "_write": "t1", "summary": "tests v1", "tests_selected": [red_cmd]},
+            {**base, "_write": "t2", "summary": "tests v2, stronger", "tests_selected": [red_cmd]},
+            {**base, "_touch": str(flag), "_write": "impl", "summary": "implemented", "tests_selected": []},
+        ]
+    )
+    tracker = fakes.FakeTracker({"PROJ-12": fakes.issue("PROJ-12", issue_type="Story")})
+    rt, results = await _run(config_path, tracker, ["PROJ-12"])
+    task = results[0]
+    assert task.state == "RED_REVIEW", task.error
+    first_red = task.phase_commits[0]
+    red_md = (rt.task_dir("PROJ-12") / "red.md").read_text()
+    assert (
+        "tests v1" in red_md and "os.path.exists" in red_md and "exit 1" in red_md or first_red[:10] in red_md
+    )
+    audit = [json.loads(line) for line in rt.audit.path.read_text().splitlines()]
+    assert any(e["event"] == "jira_skipped" and (e.get("attach") or "").endswith("red.md") for e in audit)
+    # the approver sends the tests back; the rewritten tests replace the red commit
+    feature.revise(task, "Assert the return value too.", 2)
+    assert task.state == "TEST_WRITING" and task.spec_revision == 0
+    rt.store.save_task(rt.run_id, task)
+    specs = await ExplicitKeys(tracker, ["PROJ-12"]).tasks()
+    task = (await run_all(rt, specs, rt.store.load_tasks(rt.run_id)))[0]
+    assert task.state == "RED_REVIEW", task.error
+    assert task.phase_commits != [first_red] and len(task.phase_commits) == 1
+    assert "sent the tests back" in fakes.CALLS["worker"][2].prompt
+    # approval at RED_REVIEW starts the implementation
+    feature.approve(task, "")
+    assert task.state == "IMPLEMENTING"
+    rt.store.save_task(rt.run_id, task)
+    task = (await run_all(rt, specs, rt.store.load_tasks(rt.run_id)))[0]
+    assert task.state == "DONE", task.error
+    log = (
+        _git("log", "--format=%s", "origin/develop..HEAD", cwd=Path(task.worktree_path)).strip().splitlines()
+    )
+    assert len(log) == 2 and log[1].endswith("(red)") and log[0].endswith("(green)")

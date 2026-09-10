@@ -21,7 +21,8 @@ def run_report_markdown(run_id: str, tasks: list[TaskState], dry_run: bool) -> s
     lines += ["", "| Issue | Workflow | State | Rounds | Result |", "|---|---|---|---|---|"]
     for t in tasks:
         if t.paused:
-            result = f"specification awaiting approval: `resume {run_id} --approve {t.key}`"
+            what = "failing tests" if t.state == "RED_REVIEW" else "specification"
+            result = f"{what} awaiting approval: `resume {run_id} --approve {t.key}`"
         else:
             result = t.pr_url or (t.findings_path and f"findings: {t.findings_path}") or t.error or ""
         lines.append(f"| {t.key} | {t.workflow} | {t.state} | {t.round} | {result} |")

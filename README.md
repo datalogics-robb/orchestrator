@@ -74,7 +74,10 @@ adds a specification phase and red/green test discipline:
    `resume --revise KEY --decisions FILE` makes the worker rewrite the specification.
 3. **Red.** The worker writes the tests and only the interface stubs they need. The
    orchestrator builds, runs them, and requires them to fail as assertions (not build errors or
-   resource problems, see `red_reject_patterns`), then commits them as the red commit.
+   resource problems, see `red_reject_patterns`), then commits them as the red commit. With
+   `pause_after_red: true` the task stops at `RED_REVIEW` with `red.md` attached to the issue so
+   a person can inspect the tests and their inputs; `resume --approve` starts the
+   implementation and `--revise` sends the tests back.
 4. **Green.** The worker implements the specification. Build, the red tests plus anything the
    worker adds, pre-commit, and the green commit follow. The red commit is never squashed away,
    so the PR shows the tests failing before the change and passing after it.

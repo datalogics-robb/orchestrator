@@ -380,6 +380,12 @@ class FeatureWorkflowConfig(StrictModel):
         description="The new tests must build and then fail before the implementation starts. A passing or "
         "non-building test set goes back to the worker.",
     )
+    pause_after_red: bool = Field(
+        False,
+        description="Pause at RED_REVIEW once the failing tests are committed, so a person can inspect the tests "
+        "and their inputs (red.md, attached to the issue) before the implementation starts. "
+        "`resume --approve KEY` continues; `--revise KEY --decisions FILE` sends the tests back.",
+    )
     red_reject_patterns: list[str] = Field(
         [],
         description="Regexes matched against the failing test output. A match means the failure is not a real "

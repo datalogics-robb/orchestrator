@@ -276,9 +276,13 @@ def _progress_table(states: dict[str, tuple[str, str, float]]) -> Table:
     table.add_column("elapsed", justify="right")
     table.add_column("note")
     for key, (stage, note, started) in states.items():
-        color = {"DONE": "green", "BLOCKED": "yellow", "FAILED": "red", "AWAITING_APPROVAL": "magenta"}.get(
-            stage, "cyan"
-        )
+        color = {
+            "DONE": "green",
+            "BLOCKED": "yellow",
+            "FAILED": "red",
+            "AWAITING_APPROVAL": "magenta",
+            "RED_REVIEW": "magenta",
+        }.get(stage, "cyan")
         table.add_row(key, f"[{color}]{stage}[/{color}]", f"{int(time.monotonic() - started)}s", note[:80])
     return table
 
@@ -388,9 +392,12 @@ async def _run(
         console.print(f"report: {report}")
         for r in results:
             if r.paused:
+                what, doc = (
+                    ("failing tests", "red.md") if r.state == "RED_REVIEW" else ("specification", "spec.md")
+                )
                 console.print(
-                    f"[magenta]{r.key}[/magenta] is waiting for approval of its specification: "
-                    f"{rt.task_dir(r.key) / 'spec.md'}\n  approve: orchestrator resume {rt.run_id} --approve {r.key} "
+                    f"[magenta]{r.key}[/magenta] is waiting for approval of its {what}: "
+                    f"{rt.task_dir(r.key) / doc}\n  approve: orchestrator resume {rt.run_id} --approve {r.key} "
                     f"[--decisions FILE]\n  send back: orchestrator resume {rt.run_id} --revise {r.key} --decisions FILE"
                 )
         if all(r.state == "DONE" for r in results):
@@ -496,14 +503,16 @@ def resume(
         None,
         "--approve",
         metavar="KEY",
-        help="Approve the specification of a feature task that is AWAITING_APPROVAL; it goes on to write "
-        "its failing tests. Combine with --decisions to attach answers and instructions the worker must follow.",
+        help="Approve a paused feature task: at AWAITING_APPROVAL the specification is accepted and the worker "
+        "writes its failing tests; at RED_REVIEW the committed tests are accepted and the implementation starts. "
+        "Combine with --decisions to attach answers and instructions the worker must follow.",
     ),
     revise: str | None = typer.Option(
         None,
         "--revise",
         metavar="KEY",
-        help="Send a feature task's specification back to be rewritten. Requires --decisions saying what to change.",
+        help="Send a paused feature task's specification (AWAITING_APPROVAL) or tests (RED_REVIEW) back to be "
+        "rewritten. Requires --decisions saying what to change.",
     ),
     decisions: Path | None = typer.Option(
         None,
@@ -574,7 +583,8 @@ def status(
     for t in store.load_tasks(run_id).values():
         note = t.pr_url or t.error or ""
         if t.paused:
-            note = f"spec awaiting approval: resume {run_id} --approve {t.key}"
+            what = "red tests" if t.state == "RED_REVIEW" else "spec"
+            note = f"{what} awaiting approval: resume {run_id} --approve {t.key}"
         table.add_row(t.key, t.workflow, t.state, str(t.round), f"${t.cost_usd:.2f}", note)
     console.print(table)
 
