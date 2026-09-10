@@ -687,3 +687,66 @@ async def test_squash_all_folds_agent_checkpoints_but_keeps_the_red_commit(
     assert len(log) == 2
     assert log[1].endswith("(red)") and log[1].startswith(task.phase_commits[0])
     assert log[0].endswith("(green)") and log[0].startswith(task.commit_sha)
+
+
+@pytest.mark.usefixtures("fake_runners")
+async def test_budget_blocks_after_the_stage_is_recorded_and_retry_blocked_continues(
+    config_path: Path, config_dict: dict, tmp_path: Path
+) -> None:
+    import yaml
+
+    from orchestrator.pipeline.scheduler import reopen
+
+    # every fake agent call costs $0.01: spec + red is over a $0.015 ceiling, so the block lands after the red phase
+    _feature_config(config_dict, config_path, require_approval=False, spec_review=False, max_cost_usd=0.015)
+    flag = tmp_path / "frob.implemented"
+    fakes.SCRIPT["worker"].extend(
+        [
+            SPEC,
+            {
+                "status": "completed",
+                "_write": "tests",
+                "summary": "tests",
+                "changed_paths": ["agent_change.txt"],
+                "tests_selected": [_failing_until(flag)],
+                "test_rationale": "",
+            },
+        ]
+    )
+    tracker = fakes.FakeTracker({"PROJ-16": fakes.issue("PROJ-16", issue_type="Story")})
+    rt, results = await _run(config_path, tracker, ["PROJ-16"])
+    task = results[0]
+    assert task.state == "BLOCKED" and task.error == "budget"
+    # the paid-for red phase was recorded before the block: its output and the next stage are on the task
+    assert task.worker_result["summary"] == "tests" and task.history[-2][1] == "RED_CHECK"
+    findings = Path(task.findings_path).read_text()
+    assert "--retry-blocked" in findings
+    # raise the ceiling and continue from RED_CHECK; the fake worker's default output finishes the feature
+    config_dict["workflows"]["feature"]["max_cost_usd"] = 10
+    config_path.write_text(yaml.safe_dump(config_dict))
+    reopen(task)
+    assert task.state == "RED_CHECK" and task.findings_path is None
+    rt.store.save_task(rt.run_id, task)
+    fakes.SCRIPT["worker"].append(
+        {
+            "status": "completed",
+            "_touch": str(flag),
+            "_write": "impl",
+            "summary": "implemented",
+            "changed_paths": ["agent_change.txt"],
+            "tests_selected": [],
+            "test_rationale": "",
+        }
+    )
+    rt2 = build_runtime(
+        load_config(config_path),
+        config_path,
+        run_id=rt.run_id,
+        dry_run=True,
+        keep_worktrees=True,
+        tracker=tracker,
+    )
+    specs = await ExplicitKeys(tracker, ["PROJ-16"]).tasks()
+    task = (await run_all(rt2, specs, rt2.store.load_tasks(rt.run_id)))[0]
+    assert task.state == "DONE", task.error
+    assert task.phase_commits and task.commit_sha

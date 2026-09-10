@@ -297,6 +297,7 @@ async def _run(
     resume_id: str | None,
     show_prompt: bool,
     retry_failed: bool = False,
+    retry_blocked: bool = False,
     only: list[str] | None = None,
     workflow: str | None = None,
     approve: str | None = None,
@@ -338,15 +339,16 @@ async def _run(
         if only:
             keys = [k for k in keys if k in only]
             existing = {k: t for k, t in existing.items() if k in only}
-        if retry_failed:
-            from orchestrator.pipeline.task import TERMINAL
+        reopen_states = {"FAILED"} if retry_failed else set()
+        if retry_blocked:
+            reopen_states.add("BLOCKED")
+        for t in existing.values():
+            if t.state in reopen_states:
+                from orchestrator.pipeline.scheduler import reopen
 
-            for t in existing.values():
-                if t.state == "FAILED":
-                    previous = [s for _, s in t.history if s not in TERMINAL]
-                    t.outcome, t.error = "", None
-                    t.transition(previous[-1] if previous else "CONTEXT")  # type: ignore[arg-type]
-                    rt.store.save_task(resume_id, t)
+                reopen(t)
+                rt.store.save_task(resume_id, t)
+                rt.audit.record("reopened", t.key, state=t.state)
         dry_run = dry_run or row.dry_run
         rt.dry_run = dry_run
     if not resume_id:
@@ -496,6 +498,13 @@ def resume(
         "--retry-failed",
         help="Also re-run FAILED tasks, from the stage they failed in (an orchestrator fix has been applied).",
     ),
+    retry_blocked: bool = typer.Option(
+        False,
+        "--retry-blocked",
+        help="Also re-run BLOCKED tasks from the stage they were in, keeping their worktree and rounds. For a "
+        "task blocked on budget or on exhausted fix rounds, raise workflows.feature.max_cost_usd or the "
+        "review_rounds first; use --only to pick the task.",
+    ),
     only: list[str] = typer.Option(
         None, "--only", help="Restrict to these issue keys; repeatable. Others in the run are untouched."
     ),
@@ -548,6 +557,7 @@ def resume(
             resume_id=run_id,
             show_prompt=False,
             retry_failed=retry_failed,
+            retry_blocked=retry_blocked,
             only=[k.upper() for k in only] if only else None,
             approve=approve.upper() if approve else None,
             revise=revise.upper() if revise else None,

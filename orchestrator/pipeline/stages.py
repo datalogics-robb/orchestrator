@@ -149,18 +149,23 @@ async def _run_agent(
     budget = rc.max_budget_usd
     if budget and result.cost_usd and result.cost_usd > budget and not rr.runner.capabilities.budget_cap:
         raise Failed(f"{role} spent ${result.cost_usd:.2f}, over the ${budget:.2f} budget")
-    _check_task_budget(rt, task)
     return result
 
 
-def _check_task_budget(rt: Runtime, task: TaskState) -> None:
-    """Feature tasks carry a total spend ceiling; crossing it is a blocked outcome for a person to weigh."""
+def check_task_budget(rt: Runtime, task: TaskState) -> None:
+    """Feature tasks carry a total spend ceiling; crossing it is a blocked outcome for a person to weigh.
+
+    Called by the scheduler after a stage has finished and its results are on the task, so the
+    work already paid for is kept and `resume --retry-blocked` continues from the next stage.
+    """
     cap = rt.cfg.workflows.feature.max_cost_usd if task.workflow == "feature" else None
     if cap is not None and task.cost_usd > cap:
         raise Blocked(
             "budget",
             f"Agent spend on this task reached ${task.cost_usd:.2f}, over the ${cap:.2f} ceiling set by "
-            "`workflows.feature.max_cost_usd`. Raise the ceiling and resume, or pick the work up by hand.",
+            "`workflows.feature.max_cost_usd`. The work so far is kept in the worktree. Raise the ceiling "
+            f"and run `orchestrator resume {rt.run_id} --retry-blocked --only {task.key}` to continue from "
+            f"the {task.state} stage, or pick the work up by hand.",
         )
 
 

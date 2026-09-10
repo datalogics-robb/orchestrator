@@ -9,9 +9,18 @@ from collections.abc import Awaitable
 from orchestrator.intake.base import TaskSpec, cyclic_keys
 from orchestrator.pipeline import feature, stages
 from orchestrator.pipeline.runtime import Runtime
-from orchestrator.pipeline.task import Blocked, Failed, TaskState, Workflow
+from orchestrator.pipeline.task import TERMINAL, Blocked, Failed, TaskState, Workflow
 
 STAGES = {**stages.STAGES, **feature.STAGES}
+
+
+def reopen(task: TaskState) -> None:
+    """Put a FAILED or BLOCKED task back at the last stage it was in, so a resume continues from there."""
+    if not task.terminal:
+        return
+    previous = [s for _, s in task.history if s not in TERMINAL]
+    task.outcome, task.error, task.findings_path = "", None, None
+    task.transition(previous[-1] if previous else "CONTEXT")  # type: ignore[arg-type]
 
 
 async def _report(rt: Runtime, task: TaskState, handler: Awaitable[None]) -> None:
@@ -42,6 +51,7 @@ async def run_task(rt: Runtime, spec: TaskSpec, task: TaskState) -> TaskState:
         try:
             next_state = await stage(rt, spec, task)
             task.transition(next_state)
+            stages.check_task_budget(rt, task)
         except Blocked as b:
             rt.audit.record("blocked", task.key, reason=b.reason)
             await _report(rt, task, stages.handle_blocked(rt, spec, task, b))
