@@ -57,8 +57,9 @@ test:
     strategy: agent-chosen               # the worker names the DevTest(s) it created, e.g. --tests=SF40586
     allowed_prefixes:
       - invoke -e test --config=Release
+    bare_test_template: "invoke -e test --config=Release --tests={ids}"   # bare test ids become one command
     fallback: []
-    max_commands: 3
+    max_commands: 4
   full_suite:
     - invoke -e test --config=Release
 
@@ -116,6 +117,6 @@ workflows:
       - "No such file or directory"
       - "could not open the input"
       - "No tests were found"
-    review_rounds: 3
+    review_rounds: 8
     spec_revisions: 2
-    max_cost_usd: 150
+    max_cost_usd: 500

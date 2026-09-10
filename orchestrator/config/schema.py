@@ -263,6 +263,12 @@ class TestSelection(StrictModel):
     allowed_prefixes: list[str] = Field(
         [], description="agent-chosen: a worker-selected command must start with one of these."
     )
+    bare_test_template: str | None = Field(
+        None,
+        description="agent-chosen: workers often list bare test ids (`SF12345`) instead of commands. With this set, "
+        "all bare ids become one command with `{ids}` replaced by the comma-joined ids, e.g. "
+        "`invoke -e test --config=Release --tests={ids}`. Without it a bare id is appended to the first allowed prefix.",
+    )
     max_commands: int = Field(3, description="Upper bound on test commands per round.")
 
 

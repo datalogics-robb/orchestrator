@@ -45,23 +45,28 @@ class AgentChosenSelector:
 
     def select(self, changed_paths: list[str], agent_choice: list[str]) -> list[list[str]]:
         chosen: list[list[str]] = []
+        bare_ids: list[str] = []
+        prefixes = self.cfg.allowed_prefixes
         for item in agent_choice:
             argv = shlex.split(item)
+            if not argv:
+                continue
             text = " ".join(argv)
-            if not self.cfg.allowed_prefixes or any(text.startswith(p) for p in self.cfg.allowed_prefixes):
-                # bare test ids are run with the first allowed prefix
-                if (
-                    argv
-                    and not any(text.startswith(p) for p in self.cfg.allowed_prefixes)
-                    and self.cfg.allowed_prefixes
-                ):
-                    argv = shlex.split(self.cfg.allowed_prefixes[0]) + argv
+            if not prefixes or any(text.startswith(p) for p in prefixes):
                 if argv not in chosen:
                     chosen.append(argv)
-            elif self.cfg.allowed_prefixes:
-                argv = shlex.split(self.cfg.allowed_prefixes[0]) + argv
+            elif len(argv) == 1 and self.cfg.bare_test_template:
+                if argv[0] not in bare_ids:
+                    bare_ids.append(argv[0])
+            else:
+                # anything else the worker named is run under the first allowed prefix
+                argv = shlex.split(prefixes[0]) + argv
                 if argv not in chosen:
                     chosen.append(argv)
+        if bare_ids and self.cfg.bare_test_template:
+            command = shlex.split(self.cfg.bare_test_template.replace("{ids}", ",".join(bare_ids)))
+            if command not in chosen:
+                chosen.append(command)
         if not chosen:
             chosen = list(self.cfg.fallback)
         return chosen[: self.cfg.max_commands]

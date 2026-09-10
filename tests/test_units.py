@@ -180,6 +180,32 @@ def test_agent_chosen_selector_enforces_prefix() -> None:
     ]
 
 
+def test_agent_chosen_selector_collects_bare_test_ids() -> None:
+    sel = selector_for(
+        Selection(
+            strategy="agent-chosen",
+            allowed_prefixes=["invoke -e test --config=Release"],
+            bare_test_template="invoke -e test --config=Release --tests={ids}",
+            max_commands=4,
+        )
+    )
+    chosen = sel.select(
+        [],
+        [
+            "invoke -e test --config=Release --groups=Converter",
+            "SF47677",
+            "SF47677-2",
+            "SF47677",
+            "Converter group (161 tests)",
+        ],
+    )
+    assert chosen == [
+        ["invoke", "-e", "test", "--config=Release", "--groups=Converter"],
+        ["invoke", "-e", "test", "--config=Release", "Converter", "group", "(161", "tests)"],
+        ["invoke", "-e", "test", "--config=Release", "--tests=SF47677,SF47677-2"],
+    ]
+
+
 # --- intake ------------------------------------------------------------------
 
 
