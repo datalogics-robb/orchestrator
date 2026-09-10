@@ -594,3 +594,96 @@ async def test_worker_runtime_failure_resumes_the_same_session(config_path: Path
     assert "previous session was interrupted" in second.prompt and "ENOTFOUND" in second.prompt
     events = [json.loads(line)["event"] for line in rt.audit.path.read_text().splitlines()]
     assert "interrupted" in events and "retry" in events
+
+
+@pytest.mark.usefixtures("fake_runners")
+async def test_squash_none_keeps_agent_commits_and_red_is_never_folded(
+    config_path: Path, config_dict: dict, tmp_path: Path
+) -> None:
+    import yaml
+
+    _feature_config(config_dict, config_path, require_approval=False, spec_review=False)
+    config_dict["commit"] = {"squash": "none"}
+    config_path.write_text(yaml.safe_dump(config_dict))
+    flag = tmp_path / "frob.implemented"
+    red_cmd = _failing_until(flag)
+    base = {"status": "completed", "changed_paths": ["agent_change.txt"], "test_rationale": ""}
+    fakes.SCRIPT["worker"].extend(
+        [
+            SPEC,
+            {
+                **base,
+                "_write": "tests",
+                "_commit": "agent: tests checkpoint",
+                "summary": "tests",
+                "tests_selected": [red_cmd],
+            },
+            {
+                **base,
+                "_touch": str(flag),
+                "_write": "impl",
+                "_commit": "agent: impl checkpoint",
+                "summary": "done",
+                "tests_selected": [],
+            },
+        ]
+    )
+    tracker = fakes.FakeTracker({"PROJ-14": fakes.issue("PROJ-14", issue_type="Story")})
+    rt, results = await _run(config_path, tracker, ["PROJ-14"])
+    task = results[0]
+    assert task.state == "DONE", task.error
+    log = (
+        _git("log", "--format=%H %s", "origin/develop..HEAD", cwd=Path(task.worktree_path))
+        .strip()
+        .splitlines()
+    )
+    # the worker committed everything itself both times: its commits are the red and green commits
+    assert [line.split(" ", 1)[1] for line in log] == ["agent: impl checkpoint", "agent: tests checkpoint"]
+    assert log[1].startswith(task.phase_commits[0]) and log[0].startswith(task.commit_sha)
+    assert "Red, then green" in (rt.task_dir("PROJ-14") / "pr-body.md").read_text()
+
+
+@pytest.mark.usefixtures("fake_runners")
+async def test_squash_all_folds_agent_checkpoints_but_keeps_the_red_commit(
+    config_path: Path, config_dict: dict, tmp_path: Path
+) -> None:
+    import yaml
+
+    _feature_config(config_dict, config_path, require_approval=False, spec_review=False)
+    config_dict["commit"] = {"squash": "all"}
+    config_path.write_text(yaml.safe_dump(config_dict))
+    flag = tmp_path / "frob.implemented"
+    red_cmd = _failing_until(flag)
+    base = {"status": "completed", "changed_paths": ["agent_change.txt"], "test_rationale": ""}
+    fakes.SCRIPT["worker"].extend(
+        [
+            SPEC,
+            {
+                **base,
+                "_write": "tests",
+                "_commit": "agent: tests checkpoint",
+                "summary": "tests",
+                "tests_selected": [red_cmd],
+            },
+            {
+                **base,
+                "_touch": str(flag),
+                "_write": "impl",
+                "_commit": "agent: impl checkpoint",
+                "summary": "done",
+                "tests_selected": [],
+            },
+        ]
+    )
+    tracker = fakes.FakeTracker({"PROJ-15": fakes.issue("PROJ-15", issue_type="Story")})
+    rt, results = await _run(config_path, tracker, ["PROJ-15"])
+    task = results[0]
+    assert task.state == "DONE", task.error
+    log = (
+        _git("log", "--format=%H %s", "origin/develop..HEAD", cwd=Path(task.worktree_path))
+        .strip()
+        .splitlines()
+    )
+    assert len(log) == 2
+    assert log[1].endswith("(red)") and log[1].startswith(task.phase_commits[0])
+    assert log[0].endswith("(green)") and log[0].startswith(task.commit_sha)

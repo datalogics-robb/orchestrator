@@ -93,6 +93,17 @@ class _Fake:
                 (request.cwd / out.pop("_touch")).write_text("")
             if out.get("_delete"):
                 (request.cwd / out.pop("_delete")).unlink()
+            if out.get("_commit"):
+                # an agent checkpoint commit
+                # the installed pre-commit hook needs the worktree venv on PATH, as the agent's env has
+                subprocess.run(["git", "add", "-A"], cwd=request.cwd, check=True, env=request.env)
+                subprocess.run(
+                    ["git", "-c", "commit.gpgsign=false", "commit", "-q", "-m", out.pop("_commit")],
+                    cwd=request.cwd,
+                    check=True,
+                    env=request.env,
+                    capture_output=True,
+                )
         elif self.role == "worker":
             out = default_worker_output(request)
         else:

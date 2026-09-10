@@ -123,14 +123,20 @@ class WorktreeManager:
                 excluded.append(rel)
         return excluded
 
-    async def stage_all(self, wt: Worktree, reset_to: str | None = None) -> list[str]:
-        """Fold agent commits back into the index and stage the working tree. Returns excluded paths.
+    async def stage_all(self, wt: Worktree, reset_to: str | None = None, *, squash: bool = True) -> list[str]:
+        """Stage the working tree for the orchestrator's commit. Returns excluded paths.
 
-        `reset_to` keeps commits up to that SHA (a red commit) and squashes only what follows.
+        With `squash`, the agent's own commits since `reset_to` (default: the base) are folded back
+        into the index first. `reset_to` names a commit that must survive, such as the red commit.
+        Without `squash`, the agent's commits stay and only the uncommitted work is staged.
         """
-        await git("reset", "--soft", reset_to or wt.base_ref, cwd=wt.path)
+        if squash:
+            await git("reset", "--soft", reset_to or wt.base_ref, cwd=wt.path)
         await git("add", "-A", cwd=wt.path)
         return await self._filter_staged(wt)
+
+    async def head(self, wt: Worktree) -> str:
+        return (await git("rev-parse", "HEAD", cwd=wt.path)).out.strip()
 
     async def has_staged_changes(self, wt: Worktree) -> bool:
         res = await git("diff", "--cached", "--quiet", cwd=wt.path, check=False)

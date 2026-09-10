@@ -538,16 +538,23 @@ async def stage_commit(rt: Runtime, spec: TaskSpec, task: TaskState) -> State:
     wt = _worktree(rt, task)
     summary = (task.worker_result or {}).get("summary") or spec.issue.summary
     message = commit_message(rt, spec, task, summary, phase="green" if task.phase_commits else "")
-    # a red commit stays as it is; only the work after it is squashed
+    # the red commit is never folded, whatever commit.squash says; it is the point of the workflow
     reset_to = task.phase_commits[-1] if task.phase_commits else None
     try:
-        excluded = await rt.worktrees.stage_all(wt, reset_to=reset_to)
+        excluded = await rt.worktrees.stage_all(wt, reset_to=reset_to, squash=rt.cfg.commit.squash != "none")
         has_changes = await rt.worktrees.has_staged_changes(wt)
         files = await rt.worktrees.staged_files(wt)
     except GitError as e:
         raise Failed(f"commit: {e}") from e
     task.excluded_from_commit = excluded
     if not has_changes:
+        head = await rt.worktrees.head(wt)
+        previous = reset_to or wt.base_sha or ""
+        if rt.cfg.commit.squash == "none" and head not in (wt.base_ref, previous):
+            # the worker committed its own work; that commit is the deliverable
+            task.commit_sha = head
+            rt.audit.record("commit", task.key, sha=head, excluded=excluded, agent_commit=True)
+            return "REVIEWING"
         raise Blocked(
             "technical", "The worker reported completion but the working tree has no changes to commit."
         )

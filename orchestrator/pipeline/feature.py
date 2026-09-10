@@ -277,32 +277,39 @@ async def stage_red_check(rt: Runtime, spec: TaskSpec, task: TaskState) -> State
     message = stages.commit_message(rt, spec, task, summary, phase="red")
     try:
         # a rewritten red replaces the previous red commit rather than stacking on it
-        excluded = await rt.worktrees.stage_all(wt)
+        excluded = await rt.worktrees.stage_all(wt, squash=rt.cfg.commit.squash != "none")
         has_changes = await rt.worktrees.has_staged_changes(wt)
         files = await rt.worktrees.staged_files(wt)
     except GitError as e:
         raise Failed(f"red commit: {e}") from e
     task.excluded_from_commit = excluded
+    sha: str | None = None
     if not has_changes:
-        return _red_retry(
-            rt,
-            task,
-            "## Nothing to commit\n\nThe worker reported tests but the tree is unchanged.",
-            "red-empty",
-        )
-    hook_output = await stages.precommit_gate(rt, task, wt, files, f"red-r{task.round}")
-    if hook_output is not None:
-        return _red_retry(
-            rt,
-            task,
-            "## Pre-commit hooks failed on the tests\n\nFix what they report; do not bypass them.\n\n"
-            f"```\n{hook_output}\n```",
-            "red-pre-commit",
-        )
-    try:
-        sha = await rt.worktrees.commit_staged(wt, message, env=env)
-    except GitError as e:
-        raise Failed(f"red commit: {e}") from e
+        head = await rt.worktrees.head(wt)
+        if rt.cfg.commit.squash == "none" and head not in (wt.base_ref, wt.base_sha or ""):
+            # the worker committed the tests itself; its commit is the red commit
+            sha = head
+        else:
+            return _red_retry(
+                rt,
+                task,
+                "## Nothing to commit\n\nThe worker reported tests but the tree is unchanged.",
+                "red-empty",
+            )
+    if sha is None:
+        hook_output = await stages.precommit_gate(rt, task, wt, files, f"red-r{task.round}")
+        if hook_output is not None:
+            return _red_retry(
+                rt,
+                task,
+                "## Pre-commit hooks failed on the tests\n\nFix what they report; do not bypass them.\n\n"
+                f"```\n{hook_output}\n```",
+                "red-pre-commit",
+            )
+        try:
+            sha = await rt.worktrees.commit_staged(wt, message, env=env)
+        except GitError as e:
+            raise Failed(f"red commit: {e}") from e
     if sha is None:
         return _red_retry(rt, task, "## Nothing remained to commit after the hooks ran.", "red-empty")
     task.phase_commits = [sha]

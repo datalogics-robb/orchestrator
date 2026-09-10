@@ -91,6 +91,7 @@ agents:
       reasoning_effort: high
 
 commit:
+  squash: phases                       # red commit (failing tests) stays separate; only work after it folds into green
   pre_commit: true                     # run the repo's pre-commit hooks on staged files before committing
   install_hooks: true                  # and install them in each worktree so agent commits run them too
 

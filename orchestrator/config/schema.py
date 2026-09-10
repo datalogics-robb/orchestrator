@@ -346,6 +346,17 @@ class SchedulerConfig(StrictModel):
 class CommitConfig(StrictModel):
     """How the orchestrator commits, and what it requires of agents that commit."""
 
+    squash: Literal["phases", "all", "none"] = Field(
+        "phases",
+        description=(
+            "How the agent's checkpoint commits are folded when the orchestrator commits. "
+            "phases: one commit per workflow phase; in the feature workflow the red commit (the failing "
+            "tests) stays a separate commit and only the work after it is folded into the green commit, so "
+            "the pull request shows red, then green. all: fold everything since the base into one commit; "
+            "the red commit is still kept, this only affects checkpoints the agent made itself. "
+            "none: keep the agent's own commits as they are and add one commit for whatever is uncommitted."
+        ),
+    )
     pre_commit: bool = Field(
         True,
         description=(

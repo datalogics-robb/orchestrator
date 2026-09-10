@@ -79,8 +79,10 @@ adds a specification phase and red/green test discipline:
    a person can inspect the tests and their inputs; `resume --approve` starts the
    implementation and `--revise` sends the tests back.
 4. **Green.** The worker implements the specification. Build, the red tests plus anything the
-   worker adds, pre-commit, and the green commit follow. The red commit is never squashed away,
-   so the PR shows the tests failing before the change and passing after it.
+   worker adds, pre-commit, and the green commit follow. The red commit is never folded into
+   the green commit, whatever `commit.squash` says; the PR always shows the tests failing
+   before the change and passing after it. `commit.squash` (`phases`, the default; `all`;
+   `none`) only decides what happens to checkpoint commits the agent made itself.
 5. **Review against the spec.** The reviewer judges each acceptance criterion. Findings that
    ask for behaviour the spec does not cover are marked `spec_gap` and go into the PR as open
    design questions instead of consuming fix rounds.
