@@ -177,11 +177,18 @@ class CodexRunner:
         )
         if outcome.timed_out:
             return AgentResult(False, "timeout", stderr_tail=tail(outcome.stderr))
-        session_id, usage = self._parse_events(outcome.stdout)
+        session_id, usage, errors = self._parse_events(outcome.stdout)
         last_path = request.run_dir / "last-message.txt"
         raw = last_path.read_text() if last_path.exists() else outcome.stdout
         structured = extract_json(raw)
         ok = outcome.exit_code == 0 and structured is not None
+        if ok:
+            error = None
+        elif errors:
+            # the CLI's own account of the failure (spend cap, auth, rate limit) beats the exit code
+            error = "; ".join(errors)
+        else:
+            error = f"codex exited {outcome.exit_code}" if outcome.exit_code else "no JSON result"
         return AgentResult(
             ok=ok,
             termination="completed" if outcome.exit_code == 0 else "error",
@@ -193,15 +200,15 @@ class CodexRunner:
             usage=usage,
             exit_code=outcome.exit_code,
             stderr_tail=tail(outcome.stderr),
-            error=None
-            if ok
-            else (f"codex exited {outcome.exit_code}" if outcome.exit_code else "no JSON result"),
+            error=error,
         )
 
     @staticmethod
-    def _parse_events(text: str) -> tuple[str | None, dict[str, Any]]:
+    def _parse_events(text: str) -> tuple[str | None, dict[str, Any], list[str]]:
+        """Session id, summed usage, and the messages of any `error` events from the JSONL stream."""
         session_id = None
         usage: dict[str, Any] = {}
+        errors: list[str] = []
         for line in text.splitlines():
             line = line.strip()
             if not line.startswith("{"):
@@ -217,7 +224,9 @@ class CodexRunner:
                 for k, v in ev["usage"].items():
                     if isinstance(v, (int, float)):
                         usage[k] = usage.get(k, 0) + v
-        return session_id, usage
+            elif t == "error" and ev.get("message"):
+                errors.append(str(ev["message"]))
+        return session_id, usage, errors
 
 
 def load_codex_mcp_sources(paths: list[Path]) -> dict[str, dict[str, Any]]:

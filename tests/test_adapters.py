@@ -115,8 +115,19 @@ def test_codex_event_parsing() -> None:
             json.dumps({"type": "turn.completed", "usage": {"input_tokens": 3, "output_tokens": 1}}),
         ]
     )
-    session, usage = CodexRunner._parse_events(events)
-    assert session == "t-1" and usage == {"input_tokens": 13, "output_tokens": 6}
+    session, usage, errors = CodexRunner._parse_events(events)
+    assert session == "t-1" and usage == {"input_tokens": 13, "output_tokens": 6} and errors == []
+    capped = "\n".join(
+        [
+            json.dumps({"type": "thread.started", "thread_id": "t-2"}),
+            json.dumps({"type": "turn.started"}),
+            json.dumps(
+                {"type": "error", "message": "You hit your spend cap set by the owner of your workspace."}
+            ),
+        ]
+    )
+    session, _usage, errors = CodexRunner._parse_events(capped)
+    assert session == "t-2" and errors == ["You hit your spend cap set by the owner of your workspace."]
 
 
 def test_gemini_argv(tmp_path: Path) -> None:
