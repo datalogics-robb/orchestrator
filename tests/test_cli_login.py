@@ -79,6 +79,10 @@ async def test_codex_cli_login_copies_auth(tmp_path: Path, monkeypatch: pytest.M
     run_home.mkdir()
     await CodexRunner()._ensure_login(run_home, {}, None, cli_login=True)
     assert json.loads((run_home / "auth.json").read_text()) == {"tokens": "x"}
+    # a re-used run directory picks up a login that has changed since the first attempt
+    (source_home / "auth.json").write_text(json.dumps({"tokens": "fresh"}))
+    await CodexRunner()._ensure_login(run_home, {}, None, cli_login=True)
+    assert json.loads((run_home / "auth.json").read_text()) == {"tokens": "fresh"}
     # without a login to copy, the failure is explicit
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "nowhere"))
     with pytest.raises(RuntimeError, match="codex login"):

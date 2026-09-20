@@ -241,15 +241,18 @@ def init(
 def doctor(
     config: Path = CONFIG_OPTION,
     offline: bool = typer.Option(
-        False, "--offline", help="Skip Jira, GitHub, and Confluence connectivity checks."
+        False,
+        "--offline",
+        help="Skip the agent login probe and the Jira, GitHub, and Confluence connectivity checks.",
     ),
 ) -> None:
     """Check that everything a run needs is in place.
 
     Verifies the interpreter and venv, git and gh, that every secret reference resolves,
     each role's agent CLI (binary, minimum version, which limits it enforces natively),
-    repository paths, build commands, share mounts and write roots, MCP sources, and,
-    unless `--offline`, connectivity to Jira, GitHub, and Confluence. Exit 1 when anything fails.
+    repository paths, build commands, share mounts and write roots, MCP sources, and, unless
+    `--offline`, that each role's login and model answer a one-line prompt, plus connectivity
+    to Jira, GitHub, and Confluence. Exit 1 when anything fails.
     """
     from orchestrator.doctor import doctor_sync
 

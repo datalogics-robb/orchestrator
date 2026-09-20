@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import tempfile
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,8 @@ from orchestrator.agents.runners import common
 from orchestrator.config.schema import RoleConfig
 
 MIN_VERSION = "0.100.0"
+CHECK_TIMEOUT = 120.0
+CHECK_PROMPT = "Reply with exactly: OK"
 
 
 def _toml_value(v: Any) -> str:
@@ -105,16 +108,53 @@ class CodexRunner:
         problems += common.soft_limit_warnings(role, turn_cap=False, budget_cap=False)
         return problems
 
+    async def check_live(self, role: RoleConfig, env: dict[str, str]) -> list[Problem]:
+        """Send one trivial turn through the role's own login and model.
+
+        Credentials and the model name are only settled by the service, and the reviewer runs last:
+        without this the answer arrives after a worker, a build and a test suite have been paid for.
+        """
+        if not shutil.which("codex"):
+            return []  # preflight already reported the missing binary
+        with tempfile.TemporaryDirectory(prefix="orchestrator-codex-check-") as tmp:
+            home = Path(tmp)
+            (home / "config.toml").write_text(render_config_toml({}, {}))
+            env = dict(env)
+            env["CODEX_HOME"] = str(home)
+            try:
+                await self._ensure_login(home, env, env.get(self.api_key_var), role.auth.use_cli_login)
+            except RuntimeError as e:
+                return [Problem("error", str(e))]
+            argv = ["codex", "exec", "--sandbox", "read-only", "--skip-git-repo-check", "--ephemeral"]
+            if role.model:
+                argv += ["--model", role.model]
+            effort = role.options.get("reasoning_effort")
+            if effort:
+                argv += ["-c", f"model_reasoning_effort={json.dumps(effort)}"]
+            argv += ["--json", "-"]
+            outcome = await run_process(
+                argv, cwd=home, env=env, timeout=CHECK_TIMEOUT, stdin_text=CHECK_PROMPT
+            )
+        named = f"codex: {role.model or 'the default model'}"
+        if outcome.timed_out:
+            return [Problem("warning", f"{named} did not answer within {CHECK_TIMEOUT:.0f}s")]
+        if outcome.exit_code == 0:
+            return []
+        _, _, errors = self._parse_events(outcome.stdout)
+        why = "; ".join(errors) or tail(outcome.stderr, 1) or f"codex exited {outcome.exit_code}"
+        return [Problem("error", f"{named} refused a one-line prompt: {why}")]
+
     async def _ensure_login(
         self, home: Path, env: dict[str, str], api_key: str | None, cli_login: bool = False
     ) -> None:
-        if (home / "auth.json").exists():
-            return
         if cli_login:
+            # the stored login is the source of truth; a re-used run directory must never pin an old copy
             source = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")) / "auth.json"
             if not source.exists():
                 raise RuntimeError(f"codex: use_cli_login set but {source} does not exist; run `codex login`")
             shutil.copy2(source, home / "auth.json")
+            return
+        if (home / "auth.json").exists():
             return
         if not api_key:
             return

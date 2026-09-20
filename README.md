@@ -38,6 +38,10 @@ python -m orchestrator --help
 `doctor` exits non-zero while anything is wrong. It also lists, per role, which limits the
 chosen runtime enforces natively and which the orchestrator enforces softly.
 
+Unless `--offline` is given, it sends one throwaway prompt through each role's own login and
+model. A credential or model name is only settled by the service, and the reviewer runs last,
+so without that probe a bad one surfaces after a worker, a build and a test suite are paid for.
+
 ## Running
 
 ```bash

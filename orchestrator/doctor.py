@@ -9,7 +9,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from orchestrator.agents.base import Problem
+from orchestrator.agents.base import LiveCheck, Problem
 from orchestrator.agents.registry import UnknownRunner, get_runner
 from orchestrator.config.loader import GH_TOKEN_COMMAND, SecretError, netrc_login, resolve_secret
 from orchestrator.config.schema import Config
@@ -131,6 +131,33 @@ def check_adapters(cfg: Config) -> list[Check]:
             )
         )
         out.extend(_p(f"agents.{role_name}", problems))
+    return out
+
+
+async def check_agents_live(cfg: Config) -> list[Check]:
+    """Ask each adapter that supports it to prove its login and model answer."""
+    out: list[Check] = []
+    for role_name in ("worker", "reviewer"):
+        role = cfg.agents.role(role_name)  # type: ignore[arg-type]
+        try:
+            runner = get_runner(role.runner)
+        except UnknownRunner:
+            continue  # check_adapters reported it
+        if not isinstance(runner, LiveCheck):
+            continue
+        env = dict(os.environ)
+        if not role.auth.use_cli_login:
+            try:
+                token = resolve_secret(role.auth)
+            except SecretError:
+                continue  # check_secrets reported it
+            for name in {role.auth.token_env or "API_KEY", getattr(runner, "api_key_var", "API_KEY")}:
+                env[name] = token
+        problems = await runner.check_live(role, env)
+        area = f"agents.{role_name}"
+        out.extend(_p(area, problems))
+        if not problems:
+            out.append(Check(area, "ok", f"{role.runner} answered on {role.model or 'its default model'}"))
     return out
 
 
@@ -260,6 +287,7 @@ async def run_doctor(cfg: Config, repo_root: Path, *, online: bool = True) -> li
         servers = sorted({s for r in ("worker", "reviewer") for s in cfg.agents.role(r).mcp_servers})  # type: ignore[arg-type]
         checks.append(Check("mcp", "ok", f"servers allowlisted: {', '.join(servers) or 'none'}"))
     if online:
+        checks += await check_agents_live(cfg)
         checks += await check_remote(cfg)
     return checks
 

@@ -5,13 +5,17 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from orchestrator.agents.base import Access, AgentRequest, Limits, PathGrant
+import pytest
+
+from orchestrator.agents.base import Access, AgentRequest, Limits, PathGrant, ProcessOutcome
 from orchestrator.agents.contracts import REVIEWER_SCHEMA, WORKER_SCHEMA
+from orchestrator.agents.runners import codex as codex_mod
 from orchestrator.agents.runners.claude_code import ClaudeCodeRunner
 from orchestrator.agents.runners.codex import CodexRunner
 from orchestrator.agents.runners.gemini_cli import GeminiCliRunner
 from orchestrator.agents.runners.hermes import HermesRunner
 from orchestrator.agents.runners.opencode import OpenCodeRunner
+from orchestrator.config.schema import AuthRef, RoleConfig
 
 
 def _request(tmp_path: Path, role: str = "worker", **kw) -> AgentRequest:
@@ -193,3 +197,106 @@ def test_claude_result_mapping_treats_api_error_as_runtime_error() -> None:
     assert fine.ok and fine.termination == "completed" and fine.error is None
     turns = result_from_output({"subtype": "error_max_turns", "is_error": True}, exit_code=1)
     assert turns.termination == "max_turns" and turns.error == "error_max_turns"
+
+
+# --- doctor's live probe: the login and model a run will actually use -------------------
+
+
+def _codex_role(**kw) -> RoleConfig:
+    defaults = dict(
+        runner="codex",
+        model="gpt-5.6-sol",
+        auth=AuthRef(use_cli_login=True),
+        options={"reasoning_effort": "high"},
+    )
+    defaults.update(kw)
+    return RoleConfig(**defaults)
+
+
+@pytest.fixture
+def stored_codex_login(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    home = tmp_path / "user-codex"
+    home.mkdir()
+    (home / "auth.json").write_text(json.dumps({"auth_mode": "chatgpt", "tokens": {"a": "b"}}))
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    monkeypatch.setattr(codex_mod.shutil, "which", lambda name: f"/usr/bin/{name}")
+    return home
+
+
+def _stub_run_process(monkeypatch: pytest.MonkeyPatch, outcome: ProcessOutcome) -> list[list[str]]:
+    seen: list[list[str]] = []
+
+    async def fake(argv: list[str], **kw) -> ProcessOutcome:
+        seen.append(argv)
+        return outcome
+
+    monkeypatch.setattr(codex_mod, "run_process", fake)
+    return seen
+
+
+async def test_codex_check_live_sends_the_configured_model(
+    stored_codex_login: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen = _stub_run_process(monkeypatch, ProcessOutcome(0, "", "", False))
+    assert await CodexRunner().check_live(_codex_role(), {"PATH": "/usr/bin"}) == []
+    argv = seen[0]
+    assert argv[:2] == ["codex", "exec"]
+    assert "--model" in argv and argv[argv.index("--model") + 1] == "gpt-5.6-sol"
+    assert 'model_reasoning_effort="high"' in argv
+    assert "--sandbox" in argv and argv[argv.index("--sandbox") + 1] == "read-only"
+    assert argv[-1] == "-"
+
+
+async def test_codex_check_live_reports_the_service_refusal(
+    stored_codex_login: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A model the account cannot serve is a doctor failure, not a surprise after the build."""
+    refusal = "The 'gpt-5.6' model is not supported when using Codex with a ChatGPT account."
+    events = json.dumps({"type": "error", "message": refusal})
+    _stub_run_process(monkeypatch, ProcessOutcome(1, events, "", False))
+    problems = await CodexRunner().check_live(_codex_role(model="gpt-5.6"), {})
+    assert [p.level for p in problems] == ["error"]
+    assert refusal in problems[0].message and "gpt-5.6" in problems[0].message
+
+
+async def test_codex_check_live_warns_when_nothing_answers(
+    stored_codex_login: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_run_process(monkeypatch, ProcessOutcome(None, "", "", True))
+    problems = await CodexRunner().check_live(_codex_role(), {})
+    assert [p.level for p in problems] == ["warning"]
+    assert "did not answer" in problems[0].message
+
+
+async def test_codex_check_live_needs_a_stored_login(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "nowhere"))
+    monkeypatch.setattr(codex_mod.shutil, "which", lambda name: f"/usr/bin/{name}")
+    seen = _stub_run_process(monkeypatch, ProcessOutcome(0, "", "", False))
+    problems = await CodexRunner().check_live(_codex_role(), {})
+    assert [p.level for p in problems] == ["error"] and "codex login" in problems[0].message
+    assert seen == []  # nothing is spent when the credential is already missing
+
+
+async def test_doctor_surfaces_a_dead_reviewer_login(
+    config_dict: dict, stored_codex_login: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reviewer runs last; doctor has to fail before a worker and a build are paid for."""
+    from orchestrator.config.schema import Config
+    from orchestrator.doctor import check_agents_live
+
+    config_dict["agents"]["reviewer"] = {
+        "runner": "codex",
+        "access": "read-only",
+        "model": "gpt-5.6",
+        "auth": {"use_cli_login": True},
+        "shares": {"support": "read", "raid": "read"},
+        "timeout_minutes": 1,
+    }
+    refusal = "The 'gpt-5.6' model is not supported when using Codex with a ChatGPT account."
+    _stub_run_process(
+        monkeypatch, ProcessOutcome(1, json.dumps({"type": "error", "message": refusal}), "", False)
+    )
+    checks = await check_agents_live(Config.model_validate(config_dict))
+    # the fake worker offers no live check; only the reviewer is probed
+    assert [(c.area, c.status) for c in checks] == [("agents.reviewer", "fail")]
+    assert refusal in checks[0].detail

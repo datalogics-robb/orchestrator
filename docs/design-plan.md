@@ -145,6 +145,10 @@ class AgentRunner(Protocol):
                   schema: dict, session: str | None,
                   limits: Limits, access: Access) -> AgentResult: ...
 
+class LiveCheck(Protocol):          # optional; `doctor` probes a runner only when implemented
+    async def check_live(self, role: RoleConfig,
+                         env: dict[str, str]) -> list[Problem]: ...
+
 @dataclass(frozen=True)
 class Capabilities:
     structured_output: bool     # native JSON-schema enforcement

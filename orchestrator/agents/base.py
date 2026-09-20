@@ -114,6 +114,16 @@ class AgentRunner(Protocol):
     async def run(self, request: AgentRequest) -> AgentResult: ...
 
 
+@runtime_checkable
+class LiveCheck(Protocol):
+    """Adapters that can prove the role's credentials and model answer, before a run spends on them.
+
+    Optional: `doctor` probes a runner only when it implements this.
+    """
+
+    async def check_live(self, role: RoleConfig, env: dict[str, str]) -> list[Problem]: ...
+
+
 # ---------------------------------------------------------------------------
 # Shared machinery for subprocess-based adapters
 
