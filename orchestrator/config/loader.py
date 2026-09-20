@@ -88,6 +88,8 @@ def load_config(path: Path) -> Config:
 
 
 GH_TOKEN_COMMAND = ["gh", "auth", "token"]
+# gh prefers these over its stored login; use_cli_login asks for the login itself.
+CLI_LOGIN_UNSET = ("GH_TOKEN", "GITHUB_TOKEN")
 
 
 def resolve_secret(
@@ -98,8 +100,11 @@ def resolve_secret(
     if ref.use_cli_login:
         if cli_command is None:
             raise SecretError("use_cli_login is not supported for this credential")
+        cli_env = {k: v for k, v in source.items() if k not in CLI_LOGIN_UNSET}
         try:
-            out = subprocess.run(cli_command, capture_output=True, text=True, timeout=30, check=True)
+            out = subprocess.run(
+                cli_command, capture_output=True, text=True, timeout=30, check=True, env=cli_env
+            )
         except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
             raise SecretError(f"{' '.join(cli_command)} failed: {e}") from e
         token = out.stdout.strip()

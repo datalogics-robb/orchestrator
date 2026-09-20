@@ -35,11 +35,12 @@ class Worktree:
     branch: str
     base: str
     base_sha: str | None = None
-    """The commit the branch was created from. `origin/<base>` keeps moving; this does not."""
+    """The commit the branch was created from. `<remote>/<base>` keeps moving; this does not."""
+    remote: str = "origin"
 
     @property
     def base_ref(self) -> str:
-        return self.base_sha or f"origin/{self.base}"
+        return self.base_sha or f"{self.remote}/{self.base}"
 
 
 class WorktreeManager:
@@ -53,7 +54,7 @@ class WorktreeManager:
 
     async def fetch_base(self) -> None:
         async with self._lock():
-            await git("fetch", "origin", self.repo.base_branch, cwd=self.clone)
+            await git("fetch", self.repo.remote, self.repo.base_branch, cwd=self.clone)
 
     async def create(self, key: str, summary: str) -> Worktree:
         await self.fetch_base()
@@ -70,7 +71,7 @@ class WorktreeManager:
             str(path),
             "-b",
             branch,
-            f"origin/{self.repo.base_branch}",
+            f"{self.repo.remote}/{self.repo.base_branch}",
             cwd=self.clone,
         )
         common = Path(
@@ -83,7 +84,13 @@ class WorktreeManager:
             with exclude.open("a") as f:
                 f.write("\n.orchestrator/\n")
         base_sha = (await git("rev-parse", "HEAD", cwd=path)).out.strip()
-        return Worktree(path=path, branch=branch, base=self.repo.base_branch, base_sha=base_sha)
+        return Worktree(
+            path=path,
+            branch=branch,
+            base=self.repo.base_branch,
+            base_sha=base_sha,
+            remote=self.repo.remote,
+        )
 
     async def existing(self, key: str, base_sha: str | None = None) -> Worktree | None:
         path = self.root / key
@@ -92,7 +99,13 @@ class WorktreeManager:
         res = await git("rev-parse", "--abbrev-ref", "HEAD", cwd=path, check=False)
         if res.code != 0:
             return None
-        return Worktree(path=path, branch=res.out.strip(), base=self.repo.base_branch, base_sha=base_sha)
+        return Worktree(
+            path=path,
+            branch=res.out.strip(),
+            base=self.repo.base_branch,
+            base_sha=base_sha,
+            remote=self.repo.remote,
+        )
 
     async def changed_paths(self, wt: Worktree) -> list[str]:
         await git("add", "-A", "--intent-to-add", cwd=wt.path, check=False)
@@ -180,7 +193,7 @@ class WorktreeManager:
             "push",
             "--force-with-lease",
             "-u",
-            "origin",
+            self.repo.remote,
             f"{wt.branch}:{wt.branch}",
             cwd=wt.path,
             env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
@@ -209,11 +222,19 @@ async def check_clone(repo: RepoConfig) -> list[str]:
     if not (repo.clone_path / ".git").exists():
         return [f"repo.clone_path {repo.clone_path} is not a git clone"]
     try:
-        res = await git("remote", "get-url", "origin", cwd=repo.clone_path)
+        res = await git("remote", "get-url", repo.remote, cwd=repo.clone_path)
         if repo.github.lower() not in res.out.lower():
-            problems.append(f"origin remote {res.out.strip()} does not match repo.github {repo.github}")
+            problems.append(
+                f"{repo.remote} remote {res.out.strip()} does not match repo.github {repo.github}"
+            )
         await git(
-            "ls-remote", "--exit-code", "--heads", "origin", repo.base_branch, cwd=repo.clone_path, timeout=60
+            "ls-remote",
+            "--exit-code",
+            "--heads",
+            repo.remote,
+            repo.base_branch,
+            cwd=repo.clone_path,
+            timeout=60,
         )
     except GitError as e:
         problems.append(str(e))

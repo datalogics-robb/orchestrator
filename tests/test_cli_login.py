@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -31,6 +32,16 @@ def test_resolve_secret_cli_command() -> None:
         resolve_secret(ref)  # no command: not supported for this credential
     with pytest.raises(SecretError):
         resolve_secret(ref, cli_command=["false"])
+
+
+def test_resolve_secret_cli_command_ignores_ambient_gh_token() -> None:
+    """gh prefers GH_TOKEN/GITHUB_TOKEN over its stored login; use_cli_login wants the login."""
+    ref = AuthRef(use_cli_login=True)
+    env = {"PATH": os.environ["PATH"], "GH_TOKEN": "env-tok", "GITHUB_TOKEN": "env-tok"}
+    out = resolve_secret(
+        ref, env=env, cli_command=["sh", "-c", 'echo "${GH_TOKEN:-}${GITHUB_TOKEN:-}stored"']
+    )
+    assert out == "stored"
 
 
 def _request(tmp_path: Path, role: str, schema: dict) -> AgentRequest:

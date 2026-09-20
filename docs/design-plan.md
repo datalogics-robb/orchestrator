@@ -376,6 +376,7 @@ confluence:
 
 repo:
   github: datalogics/apdfl
+  remote: origin                      # the clone's remote for repo.github; `upstream` for a fork clone
   base_branch: develop
   clone_path: ~/development/apdfl     # existing clone; worktrees are created beside it
   worktree_root: ~/development/.orchestrator/worktrees
@@ -508,11 +509,12 @@ Validation rules enforced by the loader:
 
 ### 6.2 Worktree
 
-- `git fetch origin <base>` under a per-repo lock, then
-  `git worktree add <root>/<key> -b <branch> origin/<base>`. The commit the branch started
-  from is recorded on the task as `base_sha`; every later diff, squash, and reset uses that
-  SHA, never the moving `origin/<base>`, so a fetch made for another worktree cannot turn
-  upstream commits into staged reversions here.
+- `git fetch <remote> <base>` under a per-repo lock, then
+  `git worktree add <root>/<key> -b <branch> <remote>/<base>`, where `<remote>` is
+  `repo.remote` (`origin` unless the clone keeps its own fork there). The commit the branch
+  started from is recorded on the task as `base_sha`; every later diff, squash, and reset
+  uses that SHA, never the moving `<remote>/<base>`, so a fetch made for another worktree
+  cannot turn upstream commits into staged reversions here.
 - Run `build.setup` and `hooks.after_worktree`.
 - Worktrees are kept after `BLOCKED` or `FAILED` for inspection and removed after `DONE`
   unless `--keep-worktrees` is passed. `orchestrator clean` prunes by age.
@@ -652,7 +654,9 @@ process boundary rather than from Claude Code's permission prompts.
   `gh auth token` for GitHub, the Claude Code subscription login for the `claude-code`
   runner, and the Codex ChatGPT login (its `auth.json`, copied into the per-run home) for
   `codex`. It exists because developers commonly hold subscriptions rather than API keys.
-  It is not valid for Jira or Confluence, which always use a token.
+  It is not valid for Jira or Confluence, which always use a token. `gh auth token` runs
+  without `GH_TOKEN`/`GITHUB_TOKEN` in its environment, so it returns the stored login
+  rather than whatever token the shell happens to export; that is what `token_env` is for.
 - Only the orchestrator process talks to Jira, Confluence, and GitHub APIs. Agents get
   files, not tokens.
 - The GitHub token needs `repo` scope only; recommend a fine-grained token limited to

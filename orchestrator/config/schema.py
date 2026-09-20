@@ -164,6 +164,10 @@ class RepoConfig(StrictModel):
     """The GitHub repository being worked on."""
 
     github: str = Field(pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", description="Repository as owner/name.")
+    remote: str = Field(
+        "origin",
+        description="Remote in the clone that points at repo.github; base branches are fetched and agent branches pushed there.",
+    )
     base_branch: str = Field("main", description="Branch that worktrees start from and PRs target.")
     clone_path: UserPath = Field(description="An existing local clone; worktrees are created from it.")
     worktree_root: UserPath = Field(description="Directory that receives one worktree per issue.")

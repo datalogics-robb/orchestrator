@@ -12,7 +12,7 @@ from orchestrator.config.loader import load_config
 from orchestrator.intake.base import ExplicitKeys, TaskSpec
 from orchestrator.pipeline.runtime import build_runtime
 from orchestrator.pipeline.scheduler import run_all
-from orchestrator.scm.worktree import WorktreeManager
+from orchestrator.scm.worktree import WorktreeManager, check_clone
 from tests import fakes
 
 
@@ -278,6 +278,28 @@ async def test_pre_commit_failure_becomes_a_fix_round(config_path: Path) -> None
     assert task.round == 1
     assert "Pre-commit hooks failed" in fakes.CALLS["worker"][1].prompt
     assert "fake-hook" in fakes.CALLS["worker"][1].prompt
+
+
+async def test_repo_remote_selects_the_remote_to_track(
+    config_path: Path, git_repo: tuple[Path, Path], tmp_path: Path
+) -> None:
+    """A clone whose origin is a personal fork tracks repo.remote instead."""
+    origin, clone = git_repo
+    fork = tmp_path / "fork.git"
+    _git("init", "--bare", "-q", "-b", "develop", str(fork), cwd=tmp_path)
+    _git("remote", "set-url", "origin", str(fork), cwd=clone)
+    _git("remote", "add", "canonical", str(origin), cwd=clone)
+    cfg = load_config(config_path)
+
+    forked = cfg.repo.model_copy(update={"github": str(origin)})
+    assert await check_clone(forked)  # origin is the fork, not the configured repository
+    repo = forked.model_copy(update={"remote": "canonical"})
+    assert await check_clone(repo) == []
+
+    manager = WorktreeManager(repo)
+    wt = await manager.create("PROJ-9", "Do the thing")
+    assert wt.base_ref == wt.base_sha
+    assert wt.base_sha == _git("rev-parse", "canonical/develop", cwd=clone).strip()
 
 
 async def test_moving_base_does_not_stage_reverts_of_upstream(

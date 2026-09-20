@@ -45,7 +45,13 @@ MAX_INLINE_DIFF = 120_000
 def _worktree(rt: Runtime, task: TaskState) -> Worktree:
     if not task.worktree_path or not task.branch:
         raise Failed("task has no worktree; cannot continue from this state")
-    return Worktree(Path(task.worktree_path), task.branch, rt.cfg.repo.base_branch, task.base_sha)
+    return Worktree(
+        Path(task.worktree_path),
+        task.branch,
+        rt.cfg.repo.base_branch,
+        task.base_sha,
+        rt.cfg.repo.remote,
+    )
 
 
 def _context_dir(wt: Worktree) -> Path:
