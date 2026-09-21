@@ -303,7 +303,10 @@ pipeline is unchanged.
   refuses symlink escapes and paths outside a write root (on the source side and on every
   destination path, after following any symlink already present there), preserves file
   metadata, and
-  appends source, destination, size, and hash of every file to the audit log. The worker
+  appends source, destination, size, and hash of every file to the audit log. Writes are
+  additive: a destination file already holding different bytes is renamed to
+  `<name>.<run id>.bak` before the copy lands, and the rename is audited as `share_backup`,
+  so no agent can destroy a file on a share. The worker
   prompt says to use it for share-to-share copies. Raw `cp` and `rsync` are not blocked
   where the adapter cannot distinguish them, but the helper is what the audit trail is
   built on.

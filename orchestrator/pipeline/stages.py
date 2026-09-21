@@ -31,7 +31,7 @@ from orchestrator.scm import precommit
 from orchestrator.scm.git import GitError
 from orchestrator.scm.github import ScmError
 from orchestrator.scm.worktree import Worktree
-from orchestrator.shares.cp import TASK_ENV
+from orchestrator.shares.cp import RUN_ENV, TASK_ENV
 from orchestrator.shares.grants import stage_helper
 from orchestrator.trackers.base import TrackerError
 
@@ -66,6 +66,7 @@ def _agent_env(rt: Runtime, role: Role, task: TaskState, wt_path: Path, run_dir:
     extra = dict(rt.cfg.build.env)
     extra.update(helper_env)
     extra[TASK_ENV] = task.key
+    extra[RUN_ENV] = rt.run_id
     extra["PIP_CACHE_DIR"] = str(rt.cfg.cache_dir / "pip")
     prepend = [bin_dir]
     venv_bin = worktree_venv_bin(wt_path)

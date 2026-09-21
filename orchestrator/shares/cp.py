@@ -5,6 +5,8 @@ Usage: orchestrator-cp <share>:<relative-path> <share>:<relative-path>
 
 Sources must lie under a granted share; destinations under a read-write grant and, when
 write roots are configured, under one of them. Symlinks that escape a share are refused.
+A destination file that already holds different bytes is never overwritten in place: it is
+renamed to `<name>.<run id>.bak` first, so a share keeps every version an agent replaced.
 Every copied file is appended to the audit log with its size and SHA-256.
 """
 
@@ -21,6 +23,7 @@ from pathlib import Path
 GRANTS_ENV = "ORCHESTRATOR_GRANTS"
 AUDIT_ENV = "ORCHESTRATOR_AUDIT"
 TASK_ENV = "ORCHESTRATOR_TASK"
+RUN_ENV = "ORCHESTRATOR_RUN"
 
 
 class CopyError(Exception):
@@ -83,6 +86,41 @@ def sha256(path: Path) -> str:
     return h.hexdigest()
 
 
+def run_tag() -> str:
+    """The label a backup carries, so a replaced file can be traced to the run that did it."""
+    return os.environ.get(RUN_ENV) or datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+
+
+def backup_path(dst: Path, tag: str) -> Path:
+    """`<name>.<tag>.bak` beside the file, numbered if that name is taken.
+
+    The suffix goes after the full name, extension included, so a backup can never be
+    picked up by anything globbing the directory for its original extension.
+    """
+    candidate = dst.with_name(f"{dst.name}.{tag}.bak")
+    n = 2
+    while candidate.exists():
+        candidate = dst.with_name(f"{dst.name}.{tag}.{n}.bak")
+        n += 1
+    return candidate
+
+
+def back_up(grant: dict, dst: Path, src: Path) -> Path | None:
+    """Move an existing destination aside before it is overwritten.
+
+    Returns the backup path, or None when there is nothing to preserve: nothing is there
+    yet, or the same bytes already are. The backup lands beside the file it replaces and
+    so is checked against the same write roots.
+    """
+    if not dst.exists() or dst.is_dir():
+        return None
+    if dst.stat().st_size == src.stat().st_size and sha256(dst) == sha256(src):
+        return None
+    backup = write_target(grant, backup_path(dst, run_tag()))
+    dst.rename(backup)
+    return backup
+
+
 def audit(entries: list[dict]) -> None:
     path = os.environ.get(AUDIT_ENV)
     if not path:
@@ -103,18 +141,23 @@ def copy(src_ref: str, dst_ref: str) -> list[dict]:
     task = os.environ.get(TASK_ENV)
     entries: list[dict] = []
 
-    def record(s: Path, d: Path) -> None:
+    def record(s: Path, d: Path, event: str = "share_copy") -> None:
         entries.append(
             {
                 "ts": ts,
                 "key": task,
-                "event": "share_copy",
+                "event": event,
                 "from": str(s),
                 "to": str(d),
                 "bytes": d.stat().st_size,
                 "sha256": sha256(d),
             }
         )
+
+    def preserve(d: Path, s: Path) -> None:
+        backup = back_up(dst_grant, d, s)
+        if backup:
+            record(d, backup, "share_backup")
 
     if src.is_dir():
         for root, _dirs, files in os.walk(src):
@@ -126,6 +169,7 @@ def copy(src_ref: str, dst_ref: str) -> list[dict]:
                 if s.is_symlink():
                     continue
                 d = write_target(dst_grant, target_dir / name)
+                preserve(d, s)
                 shutil.copy2(s, d)
                 record(s, d)
     else:
@@ -135,6 +179,7 @@ def copy(src_ref: str, dst_ref: str) -> list[dict]:
             dst = dst / src.name
         dst = write_target(dst_grant, dst)
         write_target(dst_grant, dst.parent).mkdir(parents=True, exist_ok=True)
+        preserve(dst, src)
         shutil.copy2(src, dst)
         record(src, dst)
     audit(entries)
@@ -155,7 +200,8 @@ def main(argv: list[str] | None = None) -> int:
         sys.stderr.write(f"orchestrator-cp: {e}\n")
         return 1
     for entry in entries:
-        print(f"copied {entry['from']} -> {entry['to']} ({entry['bytes']} bytes)")
+        verb = "kept" if entry["event"] == "share_backup" else "copied"
+        print(f"{verb} {entry['from']} -> {entry['to']} ({entry['bytes']} bytes)")
     return 0
 
 

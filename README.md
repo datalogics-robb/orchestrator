@@ -116,7 +116,9 @@ Points worth knowing:
 - **Network shares.** `shares:` declares mounts with per-platform paths. Roles get `read`
   or `read-write` grants; `write_under` narrows where writes may land. Agents copy between
   shares with `orchestrator-cp <share>:<path> <share>:<path>`, which enforces the grants
-  and logs every file.
+  and logs every file. It never overwrites in place: a destination file whose bytes differ
+  is first renamed to `<name>.<run id>.bak`, so a share keeps every version an agent
+  replaced.
 - **MCP servers.** The orchestrator reads the servers already configured for each CLI
   (`~/.claude.json`, `~/.codex/config.toml`, and so on) and passes only the allowlisted
   names to each role. `mcp.deny_tools` keeps specific tools off even when their server is

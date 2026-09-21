@@ -323,6 +323,54 @@ def test_cp_helper(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     assert proc.returncode == 0, proc.stderr
 
 
+def test_cp_backs_up_what_it_replaces(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    support = tmp_path / "support"
+    raid = tmp_path / "raid"
+    (support / "cases").mkdir(parents=True)
+    (support / "cases" / "a.txt").write_text("new")
+    (raid / "tests" / "SF1").mkdir(parents=True)
+    baseline = raid / "tests" / "SF1" / "a.txt"
+    baseline.write_text("official baseline")
+    grants = [
+        {"name": "support", "path": str(support), "mode": "read", "write_under": []},
+        {"name": "raid", "path": str(raid), "mode": "read-write", "write_under": [str(raid / "tests")]},
+    ]
+    (tmp_path / "grants.json").write_text(json.dumps(grants))
+    monkeypatch.setenv(cp.GRANTS_ENV, str(tmp_path / "grants.json"))
+    monkeypatch.setenv(cp.AUDIT_ENV, str(tmp_path / "audit.jsonl"))
+    monkeypatch.setenv(cp.RUN_ENV, "20260920-171514-67e6f7")
+
+    assert cp.main(["support:cases/a.txt", "raid:tests/SF1/a.txt"]) == 0
+    kept = raid / "tests" / "SF1" / "a.txt.20260920-171514-67e6f7.bak"
+    assert baseline.read_text() == "new"
+    assert kept.read_text() == "official baseline"
+    events = [json.loads(line) for line in (tmp_path / "audit.jsonl").read_text().splitlines()]
+    assert [e["event"] for e in events] == ["share_backup", "share_copy"]
+    assert events[0]["to"] == str(kept)
+
+    # the same bytes again are not a replacement; no second backup appears
+    assert cp.main(["support:cases/a.txt", "raid:tests/SF1/a.txt"]) == 0
+    assert sorted(p.name for p in (raid / "tests" / "SF1").iterdir()) == [
+        "a.txt",
+        "a.txt.20260920-171514-67e6f7.bak",
+    ]
+
+    # a second replacement in the same run is numbered, not clobbered
+    (support / "cases" / "a.txt").write_text("newer")
+    assert cp.main(["support:cases/a.txt", "raid:tests/SF1/a.txt"]) == 0
+    assert (raid / "tests" / "SF1" / "a.txt.20260920-171514-67e6f7.2.bak").read_text() == "new"
+    assert kept.read_text() == "official baseline"
+
+    # directory copies preserve each file they land on
+    (support / "bundle").mkdir()
+    (support / "bundle" / "b.txt").write_text("fresh")
+    (raid / "tests" / "SF2").mkdir()
+    (raid / "tests" / "SF2" / "b.txt").write_text("prior")
+    assert cp.main(["support:bundle", "raid:tests/SF2"]) == 0
+    assert (raid / "tests" / "SF2" / "b.txt").read_text() == "fresh"
+    assert (raid / "tests" / "SF2" / "b.txt.20260920-171514-67e6f7.bak").read_text() == "prior"
+
+
 def test_cp_refuses_destination_symlinks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     support = tmp_path / "support"
     raid = tmp_path / "raid"

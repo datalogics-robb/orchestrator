@@ -46,6 +46,8 @@ To copy files between shares use the audited helper, never plain `cp`:
     orchestrator-cp <share>:<relative/path> <share>:<relative/path>
 
 Example: `orchestrator-cp support:cases/SF12345/input.pdf raid:DevTests/assets/SF12345/input.pdf`. Record every copy in `copied_files`.
+
+A share is shared state: never move, rename, delete or overwrite anything on one with plain shell commands. Only `orchestrator-cp` may write there, and it is safe to point at a path that already exists — it renames the file it would replace to `<name>.<run id>.bak` first, so nothing is lost.
 {% endif %}
 {% if mcp_servers %}
 ## Tools

@@ -26,7 +26,7 @@ The runtime running you failed part-way through (`{{ interrupted }}`); this is t
 {% endif %}
 ## Boundaries
 
-Same as before: work only in the worktree and granted shares, do not run {% for d in deny_commands %}`{{ d }}`{% if not loop.last %}, {% endif %}{% endfor %}, keep the change focused on the issue, and use `orchestrator-cp` for any share copies.
+Same as before: work only in the worktree and granted shares, do not run {% for d in deny_commands %}`{{ d }}`{% if not loop.last %}, {% endif %}{% endfor %}, keep the change focused on the issue, and use `orchestrator-cp` for any share copies — it is the only thing that may write to a share, and it backs up any file it replaces.
 
 ## When you are done
 
