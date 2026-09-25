@@ -772,3 +772,15 @@ async def test_budget_blocks_after_the_stage_is_recorded_and_retry_blocked_conti
     task = (await run_all(rt2, specs, rt2.store.load_tasks(rt.run_id)))[0]
     assert task.state == "DONE", task.error
     assert task.phase_commits and task.commit_sha
+
+
+@pytest.mark.usefixtures("fake_runners")
+async def test_dry_run_keeps_the_worktree_of_a_completed_task(config_path: Path) -> None:
+    """A dry run pushes nothing, so its worktree is the only copy of the result."""
+    tracker = fakes.FakeTracker({"PROJ-1": fakes.issue("PROJ-1")})
+    cfg = load_config(config_path)
+    rt = build_runtime(cfg, config_path, dry_run=True, keep_worktrees=False, tracker=tracker)
+    rt.store.create_run(rt.run_id, config_path, ["PROJ-1"], True)
+    task = (await run_all(rt, await ExplicitKeys(tracker, ["PROJ-1"]).tasks()))[0]
+    assert task.state == "DONE", task.error
+    assert Path(task.worktree_path).is_dir()

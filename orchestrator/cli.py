@@ -458,7 +458,8 @@ def run(
     keep_worktrees: bool = typer.Option(
         False,
         "--keep-worktrees",
-        help="Keep worktrees of completed tasks (blocked and failed ones are always kept).",
+        help="Keep worktrees of completed tasks (blocked and failed ones, and every task in a dry run, are "
+        "always kept).",
     ),
     max_parallel: int | None = typer.Option(
         None, "--max-parallel", min=1, help="Issues processed at once; overrides scheduler.max_parallel."
@@ -521,7 +522,9 @@ def resume(
         ..., help="Run id as shown by `orchestrator status`, e.g. 20260903-141500-a1b2c3."
     ),
     config: Path = CONFIG_OPTION,
-    keep_worktrees: bool = typer.Option(False, "--keep-worktrees", help="Keep worktrees of completed tasks."),
+    keep_worktrees: bool = typer.Option(
+        False, "--keep-worktrees", help="Keep worktrees of completed tasks (always kept in a dry run)."
+    ),
     retry_failed: bool = typer.Option(
         False,
         "--retry-failed",
