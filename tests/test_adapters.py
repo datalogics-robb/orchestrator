@@ -9,6 +9,7 @@ import pytest
 
 from orchestrator.agents.base import Access, AgentRequest, Limits, PathGrant, ProcessOutcome
 from orchestrator.agents.contracts import REVIEWER_SCHEMA, WORKER_SCHEMA
+from orchestrator.agents.runners import claude_code as claude_mod
 from orchestrator.agents.runners import codex as codex_mod
 from orchestrator.agents.runners.claude_code import ClaudeCodeRunner
 from orchestrator.agents.runners.codex import CodexRunner
@@ -300,3 +301,65 @@ async def test_doctor_surfaces_a_dead_reviewer_login(
     # the fake worker offers no live check; only the reviewer is probed
     assert [(c.area, c.status) for c in checks] == [("agents.reviewer", "fail")]
     assert refusal in checks[0].detail
+
+
+def _claude_role(**kw) -> RoleConfig:
+    defaults = dict(runner="claude-code", model="claude-opus-5-5", auth=AuthRef(use_cli_login=True))
+    defaults.update(kw)
+    return RoleConfig(**defaults)
+
+
+def _stub_claude(
+    monkeypatch: pytest.MonkeyPatch, outcome: ProcessOutcome
+) -> list[tuple[list[str], dict[str, str]]]:
+    seen: list[tuple[list[str], dict[str, str]]] = []
+
+    async def fake(argv: list[str], **kw) -> ProcessOutcome:
+        seen.append((argv, kw["env"]))
+        return outcome
+
+    monkeypatch.setattr(claude_mod, "run_process", fake)
+    monkeypatch.setattr(claude_mod.shutil, "which", lambda name: f"/usr/bin/{name}")
+    return seen
+
+
+async def test_claude_check_live_uses_the_stored_login(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The subscription login is proven through the user's own config dir, as a run reaches it."""
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    ok = json.dumps({"subtype": "success", "is_error": False, "result": "OK"})
+    seen = _stub_claude(monkeypatch, ProcessOutcome(0, ok, "", False))
+    assert await ClaudeCodeRunner().check_live(_claude_role(), {"HOME": "/home/op"}) == []
+    argv, env = seen[0]
+    assert argv[:2] == ["claude", "-p"] and "--bare" not in argv
+    assert argv[argv.index("--model") + 1] == "claude-opus-5-5"
+    assert argv[argv.index("--max-turns") + 1] == "1" and "--strict-mcp-config" in argv
+    assert "CLAUDE_CONFIG_DIR" not in env
+
+
+async def test_claude_check_live_isolates_an_api_key_login(monkeypatch: pytest.MonkeyPatch) -> None:
+    ok = json.dumps({"subtype": "success", "is_error": False, "result": "OK"})
+    seen = _stub_claude(monkeypatch, ProcessOutcome(0, ok, "", False))
+    role = _claude_role(auth=AuthRef(token_env="ANTHROPIC_API_KEY"))
+    assert await ClaudeCodeRunner().check_live(role, {"ANTHROPIC_API_KEY": "k"}) == []
+    argv, env = seen[0]
+    assert "--bare" in argv and "CLAUDE_CONFIG_DIR" in env
+
+
+async def test_claude_check_live_reports_a_missing_login(monkeypatch: pytest.MonkeyPatch) -> None:
+    refusal = "Invalid API key · Please run /login"
+    out = json.dumps({"subtype": "success", "is_error": True, "result": refusal})
+    _stub_claude(monkeypatch, ProcessOutcome(1, out, "", False))
+    problems = await ClaudeCodeRunner().check_live(_claude_role(), {})
+    assert [p.level for p in problems] == ["error"] and refusal in problems[0].message
+
+
+async def test_claude_check_live_reports_non_json_output(monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_claude(monkeypatch, ProcessOutcome(1, "", "Error: keychain locked\n", False))
+    problems = await ClaudeCodeRunner().check_live(_claude_role(), {})
+    assert [p.level for p in problems] == ["error"] and "keychain locked" in problems[0].message
+
+
+async def test_claude_check_live_warns_when_nothing_answers(monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_claude(monkeypatch, ProcessOutcome(None, "", "", True))
+    problems = await ClaudeCodeRunner().check_live(_claude_role(), {})
+    assert [p.level for p in problems] == ["warning"] and "did not answer" in problems[0].message

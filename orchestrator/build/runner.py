@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import weakref
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -48,21 +49,31 @@ class StepResult:
 
 
 class BuildSemaphore:
-    """One per process; bounds concurrent builds across all tasks."""
+    """One per event loop; bounds concurrent builds across every task and run in the process.
 
-    _instance: asyncio.Semaphore | None = None
+    Configuring the same size again keeps the semaphore, so a run starting while another holds
+    permits shares the limit instead of getting a fresh one.
+    """
+
+    _instances: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore] = (
+        weakref.WeakKeyDictionary()
+    )
     _size: int = 1
 
     @classmethod
     def configure(cls, size: int) -> None:
-        cls._size = max(1, size)
-        cls._instance = None
+        size = max(1, size)
+        if size != cls._size:
+            cls._size = size
+            cls._instances.clear()
 
     @classmethod
     def get(cls) -> asyncio.Semaphore:
-        if cls._instance is None:
-            cls._instance = asyncio.Semaphore(cls._size)
-        return cls._instance
+        loop = asyncio.get_running_loop()
+        sem = cls._instances.get(loop)
+        if sem is None:
+            sem = cls._instances[loop] = asyncio.Semaphore(cls._size)
+        return sem
 
 
 async def run_step(

@@ -21,8 +21,8 @@ bin/orchestrator --help                          # runs the package from the ven
 diff and two lint errors in it; leave them, and don't edit the file except to replace it with a
 newer upstream copy.
 
-Never run `bin/orchestrator run` without `--dry-run`, or `conformance`, or `doctor` without
-`--offline`, unless asked: they push branches, open PRs, write to Jira/Confluence, or spend
+Never run `bin/orchestrator run` without `--dry-run`, or `conformance`, or `doctor` or `serve`
+without `--offline`, unless asked: they push branches, open PRs, write to Jira/Confluence, or spend
 tokens. `orchestrator.yaml` at the repo root is the user's local, gitignored config;
 `configs/pdfl18_all.yaml` is the checked-in real configuration.
 
@@ -57,10 +57,16 @@ tokens. `orchestrator.yaml` at the repo root is the user's local, gitignored con
   - `prompts/*.md`: jinja templates rendered with `StrictUndefined`.
   - `hooks/claude_pretool.py`: runs inside Claude Code as a hook, so it must stay
     standard-library only.
+- `web/` – `orchestrator serve`. `daemon.py` handles the pidfile lock, startup checks, uvicorn,
+  and detach/stop. `api.py` is the FastAPI app (operator auth, `Host` check, redaction of every
+  response). `status.py` derives the Agents tab rows from the store as pure functions.
+  `static/` holds the page: plain HTML, CSS, and JS with no build step and no CDN.
+  `docs/web-monitor-design.md` is the design and milestone plan.
 - `scm/` (git, worktrees, GitHub via `gh`, pre-commit gate), `trackers/` (Jira, ADF
   conversion), `docs/confluence.py`, `mcp/passthrough.py` (reads each CLI's own MCP config and
   forwards only allowlisted servers), `shares/` (grants plus the `orchestrator-cp` entry point),
-  `state/store.py` (SQLite checkpoints), `reporting/` (the `audit.jsonl` log with redaction, PR
+  `state/store.py` (SQLite checkpoints in WAL mode: runs with owner and heartbeat, tasks, and
+  one row per agent invocation), `reporting/` (the `audit.jsonl` log with redaction, PR
   and findings Markdown), `build/` (build semaphore, test selection), `environment.py` (the
   scrubbed env for agent and build processes).
 

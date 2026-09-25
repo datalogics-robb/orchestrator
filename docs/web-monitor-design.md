@@ -1,6 +1,6 @@
 # Web Monitor and Control: Design
 
-Status: proposal, 2026-09-24. Not implemented. This extends `design-plan.md` and changes two of
+Status: W0 and W1 implemented, 2026-09-24 (section 12); W2 to W4 are proposals. This extends `design-plan.md` and changes two of
 the decisions in its section 2: intake is no longer CLI-only, because the daemon accepts runs
 over HTTP, and deployment is no longer a foreground CLI only. It keeps the design plan's
 single-user model.
@@ -86,8 +86,9 @@ than one run in one process.
 
 1. **`BuildSemaphore.configure` resets the semaphore** (`build/runner.py`). `build_runtime`
    calls it for every run, so starting a second run while the first holds permits creates a
-   fresh semaphore and doubles build concurrency. Configure it once per process: in `serve`
-   at startup, and in `_run` for the CLI. Leave it out of `build_runtime`.
+   fresh semaphore and doubles build concurrency. Implemented: there is one semaphore per event
+   loop, and configuring the same size again keeps it, so every run in a process shares one
+   limit.
 2. **Concurrency limits.** `scheduler.max_parallel` stays per run. A new
    `web.max_concurrent_runs` (default 1) queues extra submissions, so a second run cannot
    quietly multiply the load.
@@ -359,6 +360,13 @@ orchestrator/web/
 | W2 | RunManager and the Runs tab with start, cancel, and resume | A run started from the browser completes and can be cancelled mid-agent without leftover processes |
 | W3 | Approvals tab | A feature task is approved from the browser with decisions and proceeds to red |
 | W4 | Audit and Config tabs; LaunchAgent and systemd user-unit examples | After a reboot and the operator's login, the LaunchAgent starts the daemon, the Claude probe passes, and the interrupted runs are listed |
+
+**Progress.** W0 and W1 are implemented and tested with fake agents. Two W0 exit criteria are
+still open because they need the real subscription: the live Claude probe against a real login
+(run `orchestrator doctor`), and a `max_parallel: 3` run. W1 was smoke-tested against a copy of a
+real `state.db`. Not in W1: `web.max_concurrent_runs` and `web.resume_on_start`, which only make
+sense once the daemon drives runs itself (W2), and `/api/health` re-probing logins (the startup
+probe's result is what it reports).
 
 ## 13. Open questions
 

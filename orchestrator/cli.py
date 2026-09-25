@@ -1,4 +1,4 @@
-"""Command line: init, doctor, run, status, resume, clean, show-prompt."""
+"""Command line: init, doctor, run, status, resume, serve, clean, show-prompt."""
 
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ from rich.table import Table
 from orchestrator import __version__
 from orchestrator.config.loader import ConfigError, load_config
 from orchestrator.config.schema import Config
+from orchestrator.state.store import HEARTBEAT_SECONDS, RunInUse, RunStatus, Store, effective_status
 
 HELP = """\
 Turns Jira issues into reviewed GitHub pull requests using configurable agent runtimes.
@@ -193,6 +194,15 @@ scheduler:
 hooks:
   after_worktree: []
   before_pr: []
+
+web:                                    # `orchestrator serve`: the status page
+  host: 127.0.0.1                       # any other address requires auth
+  port: 8765
+  # auth:
+  #   token_env: ORCHESTRATOR_WEB_TOKEN # the operator's token; browsers log in as user `operator`
+  public_read: false                    # true: anyone who reaches the port may view, never control
+  # tls: {certfile: ~/certs/orchestrator.pem, keyfile: ~/certs/orchestrator.key}
+  recent_minutes: 60
 """
 
 
@@ -320,6 +330,11 @@ async def _run(
         if row is None:
             err.print(f"[red]no run {resume_id}[/red]")
             return 2
+        try:
+            rt.store.claim_run(resume_id)
+        except RunInUse as e:
+            err.print(f"[red]{e}; wait for it to finish or stop that process[/red]")
+            return 2
         keys = keys or row.keys
         existing = rt.store.load_tasks(resume_id)
         for key, action in ((approve, "approve"), (revise, "revise")):
@@ -357,6 +372,8 @@ async def _run(
     if not resume_id:
         rt.store.create_run(rt.run_id, config, keys, dry_run)
     console.print(f"run [bold]{rt.run_id}[/bold] -> {rt.run_dir}" + (" (dry run)" if dry_run else ""))
+    heartbeat = asyncio.create_task(_heartbeat(rt.store, rt.run_id))
+    left: RunStatus = "interrupted"
     try:
         specs = await ExplicitKeys(rt.tracker, keys).tasks()
         if show_prompt:
@@ -377,6 +394,7 @@ async def _run(
                     rt.render("worker.md", **stages._prompt_common(rt, spec, task, fake, "worker")),
                     markup=False,
                 )
+            left = "finished"
             return 0
         states: dict[str, tuple[str, str, float]] = {s.key: ("QUEUED", "", time.monotonic()) for s in specs}
 
@@ -390,8 +408,7 @@ async def _run(
             rt.on_event = on_event
             results = await run_all(rt, specs, existing, workflow=workflow)  # type: ignore[arg-type]
             live.update(_progress_table(states))
-        if not any(r.paused for r in results):
-            rt.store.finish_run(rt.run_id)
+        left = "paused" if any(r.paused for r in results) else "finished"
         report = write_run_report(rt.run_dir, rt.run_id, results, dry_run)
         console.print(run_report_markdown(rt.run_id, results, dry_run), markup=False)
         console.print(f"report: {report}")
@@ -411,7 +428,16 @@ async def _run(
             return 3
         return 1
     finally:
+        heartbeat.cancel()
+        rt.store.release_run(rt.run_id, left)
         await rt.aclose()
+
+
+async def _heartbeat(store: Store, run_id: str) -> None:
+    """Tell other processes this run is still being driven, so they refuse to resume it."""
+    while True:
+        await asyncio.sleep(HEARTBEAT_SECONDS)
+        store.heartbeat(run_id)
 
 
 @app.command()
@@ -578,16 +604,22 @@ def status(
     config: Path = CONFIG_OPTION,
 ) -> None:
     """List recent runs, or the state, rounds, cost, and result of each task in one run."""
-    from orchestrator.state.store import Store
-
     cfg = _load(config)
     store = Store(cfg.db_path)
     if run_id is None:
         table = Table(title="runs")
-        for col in ("run id", "started", "finished", "keys", "dry run"):
+        for col in ("run id", "status", "started", "finished", "keys", "dry run"):
             table.add_column(col)
         for r in store.list_runs():
-            table.add_row(r.run_id, r.started, r.finished or "", " ".join(r.keys), "yes" if r.dry_run else "")
+            paused = any(t.paused for t in store.load_tasks(r.run_id).values()) if r.status is None else False
+            table.add_row(
+                r.run_id,
+                effective_status(r, any_paused=paused),
+                r.started,
+                r.finished or "",
+                " ".join(r.keys),
+                "yes" if r.dry_run else "",
+            )
         console.print(table)
         return
     table = Table(title=f"run {run_id}")
@@ -600,6 +632,73 @@ def status(
             note = f"{what} awaiting approval: resume {run_id} --approve {t.key}"
         table.add_row(t.key, t.workflow, t.state, str(t.round), f"${t.cost_usd:.2f}", note)
     console.print(table)
+
+
+@app.command()
+def serve(
+    config: Path = CONFIG_OPTION,
+    host: str | None = typer.Option(
+        None, "--host", help="Address to listen on; overrides web.host. Non-loopback needs web.auth."
+    ),
+    port: int | None = typer.Option(None, "--port", min=1, max=65535, help="Port; overrides web.port."),
+    detach: bool = typer.Option(
+        False,
+        "--detach",
+        help="Start the daemon in the background with output to <state_dir>/serve.log, wait until it listens, "
+        "print its URL, and return.",
+    ),
+    stop: bool = typer.Option(False, "--stop", help="Stop the daemon serving this config's state_dir."),
+    show_status: bool = typer.Option(
+        False, "--status", help="Print the running daemon's pid and URL; exit 1 when none is running."
+    ),
+    offline: bool = typer.Option(
+        False,
+        "--offline",
+        help="Skip the startup login probes and the Jira, GitHub, and Confluence connectivity checks.",
+    ),
+) -> None:
+    """Run the orchestrator as a daemon that serves a status page over HTTP.
+
+    One daemon per config: it locks `<state_dir>/serve.pid`, so a second one refuses to start.
+    Before opening the port it runs doctor's checks, including a one-line prompt through each
+    role's own login (so a Claude subscription login this process cannot reach fails here, not
+    in the first worker), and refuses to start if anything fails. The page's Agents tab shows
+    every worker and reviewer in recent runs, including runs started with `orchestrator run`,
+    and refreshes every 5 seconds.
+
+    Runs in the foreground until SIGTERM or Ctrl-C, which is what launchd and systemd expect;
+    run it as your own user, in your login session, so agents can use your CLI logins.
+    `--detach` starts it in the background instead.
+    """
+    from orchestrator.web import daemon
+
+    if sum((detach, stop, show_status)) > 1:
+        err.print("[red]give at most one of --detach, --stop, --status[/red]")
+        raise typer.Exit(2)
+    cfg = _load(config)
+    if stop:
+        raise typer.Exit(daemon.stop(cfg, say=console.print))
+    if show_status:
+        record = daemon.read_record(cfg)
+        if record is None:
+            console.print(f"no daemon is serving {cfg.resolved_state_dir}")
+            raise typer.Exit(1)
+        state = "serving" if record.ready else "starting"
+        console.print(f"{state} {record.url} (pid {record.pid}); log: {daemon.logfile(cfg)}")
+        raise typer.Exit(0)
+    try:
+        web = daemon.effective_web(cfg, host, port)
+    except ValueError as e:
+        err.print(f"[red]{e}[/red]")
+        raise typer.Exit(2) from None
+    if detach:
+        argv = ["serve", "--config", str(config.resolve())]
+        argv += ["--host", web.host, "--port", str(web.port)] + (["--offline"] if offline else [])
+        raise typer.Exit(daemon.detach(cfg, argv, say=console.print))
+    code = asyncio.run(
+        daemon.serve(cfg, config.resolve(), REPO_ROOT, web=web, online=not offline, say=console.print)
+    )
+    raise typer.Exit(code)
 
 
 def _parse_age(text: str) -> timedelta:

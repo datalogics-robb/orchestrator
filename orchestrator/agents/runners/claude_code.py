@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 from orchestrator.agents import hooks
@@ -21,6 +23,8 @@ from orchestrator.config.schema import RoleConfig
 
 MIN_VERSION = "2.1.200"
 WRITE_TOOLS = ["Edit", "Write", "MultiEdit", "NotebookEdit"]
+CHECK_TIMEOUT = 120.0
+CHECK_PROMPT = "Reply with exactly: OK"
 
 
 class ClaudeCodeRunner:
@@ -56,6 +60,46 @@ class ClaudeCodeRunner:
                 )
             )
         return problems
+
+    async def check_live(self, role: RoleConfig, env: dict[str, str]) -> list[Problem]:
+        """Send one trivial turn through the role's own login and model, the way a run reaches them.
+
+        With `use_cli_login` this proves the subscription login is reachable from this process, which
+        a background service may not be (the macOS keychain belongs to the user's login session).
+        """
+        if not shutil.which("claude"):
+            return []  # preflight already reported the missing binary
+        with tempfile.TemporaryDirectory(prefix="orchestrator-claude-check-") as tmp:
+            home = Path(tmp)
+            env = dict(env)
+            argv = ["claude", "-p", "--output-format", "json", "--max-turns", "1"]
+            if role.auth.use_cli_login:
+                if "CLAUDE_CONFIG_DIR" in os.environ:
+                    env["CLAUDE_CONFIG_DIR"] = os.environ["CLAUDE_CONFIG_DIR"]
+            else:
+                env["CLAUDE_CONFIG_DIR"] = str(home)
+                if role.options.get("bare", True):
+                    argv.append("--bare")
+            mcp = home / "mcp.json"
+            mcp.write_text(json.dumps({"mcpServers": {}}))
+            argv += ["--mcp-config", str(mcp), "--strict-mcp-config"]
+            if role.model:
+                argv += ["--model", role.model]
+            outcome = await run_process(
+                argv, cwd=home, env=env, timeout=CHECK_TIMEOUT, stdin_text=CHECK_PROMPT
+            )
+        named = f"claude-code: {role.model or 'the default model'}"
+        if outcome.timed_out:
+            return [Problem("warning", f"{named} did not answer within {CHECK_TIMEOUT:.0f}s")]
+        try:
+            data = json.loads(outcome.stdout)
+        except json.JSONDecodeError:
+            why = tail(outcome.stderr, 1) or tail(outcome.stdout, 1) or f"claude exited {outcome.exit_code}"
+            return [Problem("error", f"{named} refused a one-line prompt: {why}")]
+        if data.get("is_error") or outcome.exit_code != 0:
+            why = str(data.get("result") or tail(outcome.stderr, 1) or f"claude exited {outcome.exit_code}")
+            return [Problem("error", f"{named} refused a one-line prompt: {why.strip()}")]
+        return []
 
     def _settings(self, request: AgentRequest, home: Path) -> Path:
         rules_path = home / "hook-rules.json"

@@ -75,6 +75,8 @@ def check_secrets(cfg: Config) -> list[Check]:
     }
     if cfg.confluence:
         refs["confluence"] = cfg.confluence.auth
+    if cfg.web.auth:
+        refs["web"] = cfg.web.auth
     for name, ref in refs.items():
         try:
             if ref.use_cli_login and name.startswith("agents."):
@@ -100,6 +102,25 @@ def check_secrets(cfg: Config) -> list[Check]:
             )
         )
     return out
+
+
+def check_web(cfg: Config) -> list[Check]:
+    web = cfg.web
+    if web.loopback:
+        return [Check("web", "ok", f"serve listens on {web.host}:{web.port} (loopback only)")]
+    if web.tls is None:
+        return [
+            Check(
+                "web",
+                "warn",
+                f"serve listens on {web.host}:{web.port} over plain HTTP; the operator token crosses the "
+                "network unencrypted (set web.tls)",
+            )
+        ]
+    missing = [str(p) for p in (web.tls.certfile, web.tls.keyfile) if not p.exists()]
+    if missing:
+        return [Check("web", "fail", f"web.tls: {', '.join(missing)} not found")]
+    return [Check("web", "ok", f"serve listens on {web.host}:{web.port} over HTTPS")]
 
 
 def check_adapters(cfg: Config) -> list[Check]:
@@ -277,6 +298,7 @@ async def run_doctor(cfg: Config, repo_root: Path, *, online: bool = True) -> li
     checks += check_adapters(cfg)
     checks += check_paths(cfg)
     checks += check_commands(cfg)
+    checks += check_web(cfg)
     checks += _p("shares", check_shares(cfg))
     checks += _p("mcp", check_mcp(cfg, cfg.repo.clone_path))
     if not any(c.status == "fail" and c.area in ("shares",) for c in checks) and cfg.shares:

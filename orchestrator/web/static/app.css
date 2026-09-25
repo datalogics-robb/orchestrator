@@ -1,0 +1,156 @@
+:root {
+  --bg: #f7f7f5;
+  --surface: #ffffff;
+  --text: #1d1d1b;
+  --muted: #6b6b66;
+  --line: #e4e3de;
+  --accent: #2f5bd3;
+  --running: #1f7a4d;
+  --running-bg: #e3f4ea;
+  --warn: #9a5b00;
+  --warn-bg: #fdf0d8;
+  --attention: #7b3fb8;
+  --attention-bg: #f1e7fb;
+  --bad: #b3261e;
+  --bad-bg: #fce8e6;
+  --quiet-bg: #efeeea;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #161615;
+    --surface: #1f1f1d;
+    --text: #ecebe6;
+    --muted: #9b9a94;
+    --line: #34332f;
+    --accent: #7ea2ff;
+    --running: #6fd49d;
+    --running-bg: #17372a;
+    --warn: #f0b659;
+    --warn-bg: #3d2e12;
+    --attention: #c9a2f2;
+    --attention-bg: #33224a;
+    --bad: #ff8a80;
+    --bad-bg: #45201d;
+    --quiet-bg: #2a2a27;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+.top {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 24px;
+  align-items: baseline;
+  justify-content: space-between;
+  padding: 16px 24px 12px;
+}
+.brand .name { font-weight: 650; font-size: 17px; }
+.brand .repo { color: var(--muted); margin-left: 10px; font-family: var(--mono); font-size: 13px; }
+.meta { display: flex; gap: 16px; color: var(--muted); font-size: 12.5px; }
+.stale {
+  color: var(--bad);
+  background: var(--bad-bg);
+  border-radius: 4px;
+  padding: 0 6px;
+  font-weight: 600;
+}
+
+.banner {
+  margin: 0 24px 12px;
+  padding: 10px 14px;
+  border-radius: 6px;
+  background: var(--bad-bg);
+  color: var(--bad);
+}
+.banner.warn { background: var(--warn-bg); color: var(--warn); }
+
+.tabs {
+  display: flex;
+  gap: 2px;
+  padding: 0 24px;
+  border-bottom: 1px solid var(--line);
+  overflow-x: auto;
+}
+.tab {
+  appearance: none;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  padding: 8px 14px 10px;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  cursor: pointer;
+}
+.tab[aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent); font-weight: 600; }
+.tab:disabled { cursor: default; opacity: 0.45; }
+
+main { padding: 16px 24px 32px; }
+
+.summary { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+.summary .chip { font-size: 12.5px; }
+
+.table-wrap {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow-x: auto;
+}
+table.agents { width: 100%; border-collapse: collapse; }
+.agents th, .agents td {
+  text-align: left;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+}
+.agents th {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.agents tbody tr:last-child td { border-bottom: 0; }
+.agents .num { text-align: right; font-variant-numeric: tabular-nums; }
+.agents .run, .agents .model, .agents .stage, .agents .label { font-family: var(--mono); font-size: 12.5px; }
+.agents .run { color: var(--muted); }
+.agents a { color: var(--accent); text-decoration: none; }
+.agents a:hover { text-decoration: underline; }
+.agents .pr { margin-left: 6px; font-size: 12px; }
+.agents tr.group-start td { border-top: 1px solid var(--line); }
+.agents .error { color: var(--bad); font-size: 12px; white-space: normal; max-width: 36ch; display: block; }
+
+.chip {
+  display: inline-block;
+  border-radius: 999px;
+  padding: 1px 9px;
+  font-size: 12px;
+  font-weight: 600;
+  background: var(--quiet-bg);
+  color: var(--muted);
+}
+.chip.running { background: var(--running-bg); color: var(--running); }
+.chip.running::before { content: "● "; }
+.chip.orphaned, .chip.interrupted { background: var(--warn-bg); color: var(--warn); }
+.chip.needs-approval { background: var(--attention-bg); color: var(--attention); }
+.chip.done { background: var(--running-bg); color: var(--running); }
+.chip.blocked { background: var(--warn-bg); color: var(--warn); }
+.chip.failed { background: var(--bad-bg); color: var(--bad); }
+
+.empty { color: var(--muted); padding: 24px; margin: 0; text-align: center; }
+code { font-family: var(--mono); font-size: 12.5px; }
+
+@media (max-width: 640px) {
+  .top, .tabs, main { padding-left: 16px; padding-right: 16px; }
+  .banner { margin-left: 16px; margin-right: 16px; }
+}

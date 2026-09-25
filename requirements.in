@@ -7,6 +7,8 @@ httpx
 jinja2
 rich
 structlog
+fastapi
+uvicorn
 # development
 pytest
 pytest-asyncio

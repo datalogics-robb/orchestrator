@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Orchestrator</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <span class="name">orchestrator</span>
+      <span class="repo" id="repo"></span>
+    </div>
+    <div class="meta">
+      <span id="daemon"></span>
+      <span class="updated">updated <time id="updated">—</time></span>
+      <span class="stale" id="stale" hidden>stale</span>
+    </div>
+  </header>
+
+  <div class="banner" id="banner" hidden></div>
+
+  <nav class="tabs" role="tablist">
+    <button role="tab" class="tab" id="tab-agents" aria-selected="true" aria-controls="panel-agents">Agents</button>
+    <button role="tab" class="tab" disabled title="Coming in a later milestone">Runs</button>
+    <button role="tab" class="tab" disabled title="Coming in a later milestone">Approvals</button>
+    <button role="tab" class="tab" disabled title="Coming in a later milestone">Audit</button>
+    <button role="tab" class="tab" disabled title="Coming in a later milestone">Config</button>
+  </nav>
+
+  <main>
+    <section id="panel-agents" role="tabpanel" aria-labelledby="tab-agents">
+      <div class="summary" id="summary"></div>
+      <div class="table-wrap">
+        <table class="agents">
+          <thead>
+            <tr>
+              <th>Run</th>
+              <th>Issue</th>
+              <th>Role</th>
+              <th>Runtime / model</th>
+              <th>Activity</th>
+              <th>Status</th>
+              <th>Task stage</th>
+              <th class="num">Elapsed</th>
+              <th class="num">Turns</th>
+              <th class="num">Cost</th>
+            </tr>
+          </thead>
+          <tbody id="agents"></tbody>
+        </table>
+        <p class="empty" id="empty" hidden>No agents in recent runs. Start one with <code>orchestrator run KEY</code>.</p>
+      </div>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
