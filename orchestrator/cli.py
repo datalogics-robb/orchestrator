@@ -18,6 +18,7 @@ from rich.table import Table
 from orchestrator import __version__
 from orchestrator.config.loader import ConfigError, load_config
 from orchestrator.config.schema import Config
+from orchestrator.intake.base import KEY_PATTERN
 from orchestrator.state.store import HEARTBEAT_SECONDS, RunInUse, RunStatus, Store, effective_status
 
 HELP = """\
@@ -72,7 +73,6 @@ CONFIG_OPTION = typer.Option(
     show_default=True,
 )
 
-KEY_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]*-\d+$")
 console = Console()
 err = Console(stderr=True)
 
@@ -195,7 +195,7 @@ hooks:
   after_worktree: []
   before_pr: []
 
-web:                                    # `orchestrator serve`: the status page
+web:                                    # `orchestrator serve`: the status page and control
   host: 127.0.0.1                       # any other address requires auth
   port: 8765
   # auth:
@@ -203,6 +203,8 @@ web:                                    # `orchestrator serve`: the status page
   public_read: false                    # true: anyone who reaches the port may view, never control
   # tls: {certfile: ~/certs/orchestrator.pem, keyfile: ~/certs/orchestrator.key}
   recent_minutes: 60
+  max_concurrent_runs: 1                # runs submitted from the page beyond this wait their turn
+  resume_on_start: false                # true: a restarted daemon picks up the runs it was driving
 """
 
 
@@ -320,7 +322,7 @@ async def _run(
     from orchestrator.intake.base import ExplicitKeys
     from orchestrator.pipeline import feature
     from orchestrator.pipeline.runtime import build_runtime
-    from orchestrator.pipeline.scheduler import run_all
+    from orchestrator.pipeline.scheduler import reopen_for_retry, run_all
     from orchestrator.reporting.run_report import run_report_markdown, write_run_report
 
     rt = build_runtime(cfg, config, run_id=resume_id, dry_run=dry_run, keep_worktrees=keep_worktrees)
@@ -357,16 +359,7 @@ async def _run(
         if only:
             keys = [k for k in keys if k in only]
             existing = {k: t for k, t in existing.items() if k in only}
-        reopen_states = {"FAILED"} if retry_failed else set()
-        if retry_blocked:
-            reopen_states.add("BLOCKED")
-        for t in existing.values():
-            if t.state in reopen_states:
-                from orchestrator.pipeline.scheduler import reopen
-
-                reopen(t)
-                rt.store.save_task(resume_id, t)
-                rt.audit.record("reopened", t.key, state=t.state)
+        reopen_for_retry(rt, existing, retry_failed=retry_failed, retry_blocked=retry_blocked)
         dry_run = dry_run or row.dry_run
         rt.dry_run = dry_run
     if not resume_id:

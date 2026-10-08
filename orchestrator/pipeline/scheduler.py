@@ -23,6 +23,21 @@ def reopen(task: TaskState) -> None:
     task.transition(previous[-1] if previous else "CONTEXT")  # type: ignore[arg-type]
 
 
+def reopen_for_retry(
+    rt: Runtime, tasks: dict[str, TaskState], *, retry_failed: bool, retry_blocked: bool
+) -> list[str]:
+    """Reopen the FAILED and/or BLOCKED tasks of a run being resumed, checkpointed and audited. Returns their keys."""
+    states = ({"FAILED"} if retry_failed else set()) | ({"BLOCKED"} if retry_blocked else set())
+    reopened: list[str] = []
+    for t in tasks.values():
+        if t.state in states:
+            reopen(t)
+            rt.store.save_task(rt.run_id, t)
+            rt.audit.record("reopened", t.key, state=t.state)
+            reopened.append(t.key)
+    return reopened
+
+
 async def _report(rt: Runtime, task: TaskState, handler: Awaitable[None]) -> None:
     """Reporting a terminal outcome (Jira, Confluence) must never take the run down with it."""
     try:
@@ -85,6 +100,17 @@ async def run_task(rt: Runtime, spec: TaskSpec, task: TaskState) -> TaskState:
     return task
 
 
+def new_task(rt: Runtime, spec: TaskSpec, workflow: Workflow | None = None) -> TaskState:
+    """A fresh QUEUED task for a spec. `workflow` overrides issue-type routing."""
+    return TaskState(
+        key=spec.key,
+        summary=spec.issue.summary,
+        depends_on=spec.depends_on,
+        epic_key=spec.epic_key,
+        workflow=workflow or rt.cfg.workflows.workflow_for(spec.issue.issue_type),  # type: ignore[arg-type]
+    )
+
+
 async def run_all(
     rt: Runtime,
     specs: list[TaskSpec],
@@ -95,13 +121,7 @@ async def run_all(
     existing = existing or {}
     tasks: dict[str, TaskState] = {}
     for spec in specs:
-        state = existing.get(spec.key) or TaskState(
-            key=spec.key,
-            summary=spec.issue.summary,
-            depends_on=spec.depends_on,
-            epic_key=spec.epic_key,
-            workflow=workflow or rt.cfg.workflows.workflow_for(spec.issue.issue_type),  # type: ignore[arg-type]
-        )
+        state = existing.get(spec.key) or new_task(rt, spec, workflow)
         tasks[spec.key] = state
         rt.store.save_task(rt.run_id, state)
     sem = asyncio.Semaphore(rt.cfg.scheduler.max_parallel)

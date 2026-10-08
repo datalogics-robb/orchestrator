@@ -475,6 +475,18 @@ class WebConfig(StrictModel):
         ge=0,
         description="Finished and interrupted runs stay on the Agents tab this long after their last activity.",
     )
+    max_concurrent_runs: int = Field(
+        1,
+        ge=1,
+        description="Runs the daemon drives at once. Runs submitted from the page beyond this are queued and "
+        "start in order; scheduler.max_parallel still limits the issues within each run.",
+    )
+    resume_on_start: bool = Field(
+        False,
+        description="On start, queue again every run a daemon was driving when it stopped or died. Runs the "
+        "operator cancelled, and runs started with `orchestrator run`, are left alone. Off by default, so a "
+        "restart never spends money unasked.",
+    )
 
     @property
     def loopback(self) -> bool:

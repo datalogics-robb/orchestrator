@@ -16,6 +16,7 @@
       <span id="daemon"></span>
       <span class="updated">updated <time id="updated">—</time></span>
       <span class="stale" id="stale" hidden>stale</span>
+      <button type="button" class="action cancel" id="shutdown">Shut down</button>
     </div>
   </header>
 
@@ -23,7 +24,7 @@
 
   <nav class="tabs" role="tablist">
     <button role="tab" class="tab" id="tab-agents" aria-selected="true" aria-controls="panel-agents">Agents</button>
-    <button role="tab" class="tab" disabled title="Coming in a later milestone">Runs</button>
+    <button role="tab" class="tab" id="tab-runs" aria-selected="false" aria-controls="panel-runs">Runs</button>
     <button role="tab" class="tab" disabled title="Coming in a later milestone">Approvals</button>
     <button role="tab" class="tab" disabled title="Coming in a later milestone">Audit</button>
     <button role="tab" class="tab" disabled title="Coming in a later milestone">Config</button>
@@ -50,7 +51,52 @@
           </thead>
           <tbody id="agents"></tbody>
         </table>
-        <p class="empty" id="empty" hidden>No agents in recent runs. Start one with <code>orchestrator run KEY</code>.</p>
+        <p class="empty" id="empty" hidden>No agents in recent runs. Add issues on the Runs tab, or run <code>orchestrator run KEY</code>.</p>
+      </div>
+    </section>
+
+    <section id="panel-runs" role="tabpanel" aria-labelledby="tab-runs" hidden>
+      <form class="submit" id="submit" autocomplete="off">
+        <label class="field keys">
+          <span>Issue or epic keys</span>
+          <input id="keys" name="keys" placeholder="PROJ-123 PROJ-124, EPIC-7" required spellcheck="false">
+        </label>
+        <label class="field">
+          <span>Workflow</span>
+          <select id="workflow" name="workflow">
+            <option value="auto">auto (by issue type)</option>
+            <option value="bugfix">bugfix</option>
+            <option value="feature">feature</option>
+          </select>
+        </label>
+        <label class="check">
+          <input type="checkbox" id="dry-run" name="dry_run" checked>
+          <span>Dry run</span>
+        </label>
+        <button type="submit" class="primary" id="submit-button">Add to work</button>
+        <p class="hint" id="dry-hint">A dry run does everything locally: no push, no PR, no Jira or Confluence writes.</p>
+        <p class="hint live" id="live-hint" hidden>Not a dry run: this pushes branches, opens draft PRs, and writes to Jira.</p>
+        <p class="result" id="submit-result" role="status" hidden></p>
+      </form>
+
+      <p class="result" id="runs-result" role="status" hidden></p>
+      <div class="table-wrap">
+        <table class="agents runs">
+          <thead>
+            <tr>
+              <th>Run</th>
+              <th>Status</th>
+              <th>Keys</th>
+              <th>Tasks</th>
+              <th>Started</th>
+              <th>Driven by</th>
+              <th class="num">Cost</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="runs"></tbody>
+        </table>
+        <p class="empty" id="runs-empty" hidden>No runs yet.</p>
       </div>
     </section>
   </main>

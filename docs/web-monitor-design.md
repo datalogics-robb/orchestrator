@@ -1,6 +1,6 @@
 # Web Monitor and Control: Design
 
-Status: W0 and W1 implemented, 2026-09-24 (section 12); W2 to W4 are proposals. This extends `design-plan.md` and changes two of
+Status: W0 and W1 implemented, 2026-09-24; W2, 2026-09-29 (section 12); W3 and W4 are proposals. This extends `design-plan.md` and changes two of
 the decisions in its section 2: intake is no longer CLI-only, because the daemon accepts runs
 over HTTP, and deployment is no longer a foreground CLI only. It keeps the design plan's
 single-user model.
@@ -367,6 +367,52 @@ still open because they need the real subscription: the live Claude probe agains
 real `state.db`. Not in W1: `web.max_concurrent_runs` and `web.resume_on_start`, which only make
 sense once the daemon drives runs itself (W2), and `/api/health` re-probing logins (the startup
 probe's result is what it reports).
+
+W2's first part is implemented: `web/runs.py` (RunManager), `POST /api/runs` and `GET /api/runs`,
+`web.max_concurrent_runs`, and a Runs tab with a form that adds issues. Decisions made along the way:
+
+- **Submission reads Jira first.** The issues are fetched, and epics expanded, before the request
+  returns. The run and its tasks are then recorded at once with a new run status, `queued`, so
+  they appear on both tabs before they start. A queued run's owner keeps its heartbeat fresh like
+  a running one's, and `resume` refuses it the same way.
+- **One key, one live task.** A key with an unfinished task in a queued, running, or paused run is
+  refused, because both tasks would use the same branch.
+- **Before each run, the login probe** runs again if the last success is more than 30 minutes old;
+  a failing probe keeps the run queued and is retried every minute. With `--offline` there is no
+  probe.
+- **`dry_run` is required** in `POST /api/runs`, so a real run is never started by omission. The
+  form checks it by default and asks for confirmation when it is unchecked.
+- **Control requests must be same-origin JSON.** Any request other than GET or HEAD with a foreign
+  `Origin` gets 403, and one that is not `application/json` gets 415. A loopback daemon needs no
+  token, so this is what stops another site's page from starting runs through the browser.
+
+The rest of W2 followed on 2026-09-29: `POST /api/runs/{id}/cancel` and `/resume` (with
+`retry_failed` and `retry_blocked`), buttons for them on the Runs tab, and `web.resume_on_start`.
+
+- **Cancelled is its own run status.** A cancel kills the run's agents, leaves every task
+  checkpointed at its stage, and releases the run as `cancelled` rather than `interrupted`, so
+  `resume_on_start` never restarts what the operator stopped.
+- **Runs record what drove them.** A new `via` column in `runs` (`cli` or `daemon`) is set on
+  create and on every claim. `resume_on_start` queues only runs a daemon was driving that are now
+  interrupted (a clean stop, or a daemon that died), so a CLI run stopped with Ctrl-C stays put.
+- **Which actions a run offers** is one pure rule (`status.run_actions`), shown in `GET /api/runs`
+  as `actions`: cancel for a queued or running run this daemon drives; resume for an interrupted or
+  cancelled run with a task that would move; retry-failed and retry-blocked while such tasks exist.
+  A paused run's approval waits for W3. The manager still checks each request itself, since the
+  page can be stale.
+- **Resume re-reads Jira** like `orchestrator resume`, so an epic's new children join, and it
+  refuses a key another active run is working on.
+
+Added on 2026-10-01, outside the milestones: **shutdown from the page.** `POST /api/shutdown`
+(operator only, like every control request) stops the daemon the same way SIGTERM does: its runs
+are left `interrupted` with a `daemon_shutdown` audit record naming the client, and the process
+exits 0. The reply is sent before the server stops listening, and the page then stops polling and
+says the daemon is down. Because a requested stop exits 0, the W4 service files must restart the
+daemon only on failure (launchd `KeepAlive: {SuccessfulExit: false}`, systemd
+`Restart=on-failure`); otherwise a shutdown from the page would be undone at once.
+
+Open from the W2 exit criterion: a real (not fake) run started from the browser and cancelled
+mid-agent, checking that no agent processes are left behind.
 
 ## 13. Open questions
 

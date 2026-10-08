@@ -26,8 +26,17 @@ from orchestrator.state.store import (
     this_process,
 )
 from orchestrator.web import daemon
+from orchestrator.web import runs as runs_module
 from orchestrator.web.api import Health, create_app, host_name
-from orchestrator.web.status import DaemonInfo, RunSnapshot, agent_rows, in_scope, role_status
+from orchestrator.web.runs import RunManager
+from orchestrator.web.status import (
+    DaemonInfo,
+    RunSnapshot,
+    agent_rows,
+    in_scope,
+    role_status,
+    run_actions,
+)
 from tests import fakes
 from tests.test_pipeline import _run
 
@@ -229,7 +238,9 @@ def _client(config_dict: dict, tmp_path: Path, token: str | None = None, **web) 
     redactor = Redactor()
     redactor.add(SECRET)
     info = DaemonInfo(pid=1, host="h", port=8765, version="t", config="c.yaml", repo="example/target")
-    app = create_app(cfg, cfg.web, _seeded_store(tmp_path), redactor, info, Health(), token)
+    store = _seeded_store(tmp_path)
+    runs = RunManager(cfg, Path("c.yaml"), store)
+    app = create_app(cfg, cfg.web, store, redactor, info, Health(), token, runs, lambda client: None)
     return TestClient(app, base_url="http://127.0.0.1:8765")
 
 
@@ -294,6 +305,299 @@ def test_public_read_opens_gets_only(
     )
     assert client.get("/api/agents").status_code == 200
     assert client.post("/api/agents").status_code == 401
+    assert client.post("/api/shutdown", json={}).status_code == 401
+
+
+def test_runs_endpoint_lists_runs_with_task_counts(config_dict: dict, tmp_path: Path) -> None:
+    body = _client(config_dict, tmp_path).get("/api/runs").json()
+    (run,) = body["runs"]
+    assert run["run_id"] == "20260924-141500-a1b2c3" and run["status"] == "running"
+    assert run["tasks"] == {"FIXING": 1, "BLOCKED": 1} and run["by_this_daemon"] and run["dry_run"]
+    assert run["cost_usd"] == 3.1
+
+
+def test_control_requests_must_be_same_origin_json(config_dict: dict, tmp_path: Path) -> None:
+    client = _client(config_dict, tmp_path)
+    body = {"keys": ["PROJ-9"], "dry_run": True}
+    evil = client.post("/api/runs", json=body, headers={"Origin": "https://evil.example"})
+    assert evil.status_code == 403
+    form = client.post("/api/runs", content=b"keys=PROJ-9", headers={"Content-Type": "text/plain"})
+    assert form.status_code == 415
+    missing = client.post("/api/runs", json={"keys": ["PROJ-9"]})
+    assert missing.status_code == 422  # dry_run must be said explicitly
+    bad = client.post("/api/runs", json={"keys": ["not a key", "proj-x"], "dry_run": True})
+    assert bad.status_code == 400 and "not Jira keys: NOT A KEY, PROJ-X" in bad.json()["detail"]
+    busy = client.post(
+        "/api/runs", json={"keys": ["proj-1"], "dry_run": True}, headers={"Origin": "http://127.0.0.1:8765"}
+    )
+    assert (
+        busy.status_code == 400 and "PROJ-1 (running in run 20260924-141500-a1b2c3)" in busy.json()["detail"]
+    )
+
+
+# --- submitting runs to the daemon --------------------------------------------------------
+
+
+def _daemon_app(cfg: Config, config_path: Path, runs: RunManager, store: Store) -> httpx.AsyncClient:
+    info = DaemonInfo(pid=1, host="h", port=8765, version="t", config=str(config_path), repo="example/target")
+    app = create_app(cfg, cfg.web, store, Redactor(), info, Health(), None, runs, lambda client: None)
+    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8765")
+
+
+@pytest.mark.usefixtures("fake_runners")
+async def test_submitted_issues_are_queued_then_driven_to_done(config_path: Path, config_dict: dict) -> None:
+    cfg = _config(config_dict)
+    tracker = fakes.FakeTracker({"PROJ-1": fakes.issue("PROJ-1"), "PROJ-2": fakes.issue("PROJ-2")})
+    store = Store(cfg.db_path)
+    probes: list[str] = []
+    gate = asyncio.Event()
+
+    async def probe() -> list[str]:
+        probes.append("probe")
+        if not gate.is_set():
+            return ["agents.worker: not logged in"]
+        return []
+
+    runs = RunManager(
+        cfg, config_path, store, login_probe=probe, tracker_factory=lambda: tracker, login_retry_seconds=0.01
+    )
+    async with _daemon_app(cfg, config_path, runs, store) as client:
+        r = await client.post("/api/runs", json={"keys": ["proj-1", "PROJ-2", "PROJ-1"], "dry_run": True})
+        assert r.status_code == 202, r.text
+        submitted = r.json()
+        assert submitted["keys"] == ["PROJ-1", "PROJ-2"] and submitted["status"] == "queued"
+        run_id = submitted["run_id"]
+
+        # the login probe fails, so the run waits in the queue with its tasks already listed
+        while len(probes) < 2:
+            await asyncio.sleep(0.01)
+        agents = (await client.get("/api/agents")).json()["agents"]
+        assert {(a["key"], a["status"]) for a in agents} == {("PROJ-1", "queued"), ("PROJ-2", "queued")}
+        assert (await client.get("/api/runs")).json()["runs"][0]["status"] == "queued"
+        again = await client.post("/api/runs", json={"keys": ["PROJ-2"], "dry_run": True})
+        assert again.status_code == 400 and "PROJ-2 (queued in run" in again.json()["detail"]
+
+        gate.set()
+        await asyncio.wait_for(runs.wait(run_id), 120)
+        run = (await client.get("/api/runs")).json()["runs"][0]
+        assert run["status"] == "finished" and run["tasks"] == {"DONE": 2}, run
+    audit = (cfg.runs_dir / run_id / "audit.jsonl").read_text()
+    assert '"event": "submitted"' in audit and '"client": "127.0.0.1"' in audit
+    assert (cfg.runs_dir / run_id / "report.md").exists()
+    assert runs.run_ids == []
+
+
+@pytest.mark.usefixtures("fake_runners")
+async def test_an_unknown_issue_is_refused_without_leaving_a_run(
+    config_path: Path, config_dict: dict
+) -> None:
+    cfg = _config(config_dict)
+    store = Store(cfg.db_path)
+    runs = RunManager(cfg, config_path, store, tracker_factory=lambda: fakes.FakeTracker({}))
+    async with _daemon_app(cfg, config_path, runs, store) as client:
+        r = await client.post("/api/runs", json={"keys": ["PROJ-404"], "dry_run": True})
+    assert r.status_code == 400 and "could not read the issues from Jira" in r.json()["detail"]
+    assert store.list_runs() == [] and not any(cfg.runs_dir.iterdir())
+
+
+@pytest.mark.usefixtures("fake_runners")
+async def test_runs_beyond_the_limit_wait_and_shutdown_interrupts_them(
+    config_path: Path, config_dict: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = _config(config_dict)
+    tracker = fakes.FakeTracker({"PROJ-1": fakes.issue("PROJ-1"), "PROJ-2": fakes.issue("PROJ-2")})
+    store = Store(cfg.db_path)
+    runs = RunManager(cfg, config_path, store, tracker_factory=lambda: tracker)
+    started = asyncio.Event()
+
+    async def hang(request):  # noqa: ANN001
+        started.set()
+        await asyncio.sleep(3600)
+
+    real_build = runs_module.build_runtime
+
+    def build(*args, **kwargs):  # noqa: ANN002, ANN003
+        rt = real_build(*args, **kwargs)
+        rt.roles["worker"].runner.run = hang  # type: ignore[method-assign]
+        return rt
+
+    monkeypatch.setattr(runs_module, "build_runtime", build)
+    first = await runs.submit(["PROJ-1"], workflow=None, dry_run=True, client="test")
+    await asyncio.wait_for(started.wait(), 30)
+    second = await runs.submit(["PROJ-2"], workflow=None, dry_run=True, client="test")
+    await asyncio.sleep(0.1)
+    assert store.get_run(first.run_id).status == "running"
+    assert store.get_run(second.run_id).status == "queued"  # web.max_concurrent_runs is 1
+    await runs.shutdown()
+    assert store.get_run(first.run_id).status == "interrupted"
+    assert store.get_run(second.run_id).status == "interrupted"
+    assert store.latest_agents(first.run_id)[("PROJ-1", "worker")].termination == "killed"
+
+
+class _Hanging:
+    """Makes every worker agent of runs the manager builds hang until `release()`; counts the calls."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.started = asyncio.Event()
+        self.hanging = True
+        real_build = runs_module.build_runtime
+
+        def build(*args, **kwargs):  # noqa: ANN002, ANN003
+            rt = real_build(*args, **kwargs)
+            real_run = rt.roles["worker"].runner.run
+
+            async def run(request):  # noqa: ANN001
+                if not self.hanging:
+                    return await real_run(request)
+                self.started.set()
+                await asyncio.sleep(3600)
+
+            rt.roles["worker"].runner.run = run  # type: ignore[method-assign]
+            return rt
+
+        monkeypatch.setattr(runs_module, "build_runtime", build)
+
+    def release(self) -> None:
+        self.hanging = False
+
+
+def _states(store: Store, run_id: str) -> dict[str, str]:
+    return {k: t.state for k, t in store.load_tasks(run_id).items()}
+
+
+@pytest.mark.parametrize(
+    ("status", "states", "driven_here", "expected"),
+    [
+        ("running", ["WORKING"], True, ["cancel"]),
+        ("queued", ["QUEUED"], True, ["cancel"]),
+        ("running", ["WORKING"], False, []),  # a CLI run cannot be cancelled from the page
+        ("interrupted", ["WORKING", "DONE"], False, ["resume"]),
+        ("cancelled", ["QUEUED"], False, ["resume"]),
+        ("finished", ["DONE", "FAILED", "BLOCKED"], False, ["retry-failed", "retry-blocked"]),
+        ("paused", ["AWAITING_APPROVAL"], False, []),  # approvals are a later milestone
+        ("interrupted", ["DONE"], False, []),
+    ],
+)
+def test_run_actions(status: str, states: list[str], driven_here: bool, expected: list[str]) -> None:
+    tasks = {f"PROJ-{i}": TaskState(key=f"PROJ-{i}", state=st) for i, st in enumerate(states)}  # type: ignore[arg-type]
+    assert run_actions(status, tasks, driven_here) == expected  # type: ignore[arg-type]
+
+
+@pytest.mark.usefixtures("fake_runners")
+async def test_cancel_stops_a_run_and_resume_finishes_it(
+    config_path: Path, config_dict: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = _config(config_dict)
+    tracker = fakes.FakeTracker({"PROJ-1": fakes.issue("PROJ-1")})
+    store = Store(cfg.db_path)
+    runs = RunManager(cfg, config_path, store, tracker_factory=lambda: tracker)
+    agents = _Hanging(monkeypatch)
+    async with _daemon_app(cfg, config_path, runs, store) as client:
+        run_id = (await client.post("/api/runs", json={"keys": ["PROJ-1"], "dry_run": True})).json()["run_id"]
+        await asyncio.wait_for(agents.started.wait(), 30)
+        listed = (await client.get("/api/runs")).json()["runs"][0]
+        assert listed["status"] == "running" and listed["actions"] == ["cancel"]
+        early = await client.post(f"/api/runs/{run_id}/resume", json={})
+        assert early.status_code == 409 and "already queued or running" in early.json()["detail"]
+
+        r = await client.post(f"/api/runs/{run_id}/cancel", json={})
+        assert r.status_code == 200 and r.json()["status"] == "cancelled"
+        assert store.get_run(run_id).status == "cancelled" and runs.run_ids == []
+        assert store.latest_agents(run_id)[("PROJ-1", "worker")].termination == "killed"
+        assert _states(store, run_id) == {"PROJ-1": "WORKING"}  # checkpointed where it stopped
+        listed = (await client.get("/api/runs")).json()["runs"][0]
+        assert listed["actions"] == ["resume"]
+        agents_tab = (await client.get("/api/agents")).json()["agents"]
+        assert {a["status"] for a in agents_tab} == {"cancelled"}
+        again = await client.post(f"/api/runs/{run_id}/cancel", json={})
+        assert again.status_code == 409
+
+        agents.release()
+        r = await client.post(f"/api/runs/{run_id}/resume", json={})
+        assert r.status_code == 202, r.text
+        await asyncio.wait_for(runs.wait(run_id), 120)
+        assert _states(store, run_id) == {"PROJ-1": "DONE"}
+        run = store.get_run(run_id)
+        assert run.status == "finished" and run.via == "daemon"
+        nothing = await client.post(f"/api/runs/{run_id}/resume", json={})
+        assert nothing.status_code == 400 and "nothing to resume" in nothing.json()["detail"]
+        assert (await client.post("/api/runs/20990101-000000-000000/cancel", json={})).status_code == 404
+    events = [line for line in (cfg.runs_dir / run_id / "audit.jsonl").read_text().splitlines()]
+    assert any('"event": "cancelled"' in e and '"client": "127.0.0.1"' in e for e in events)
+    assert any('"event": "resumed"' in e for e in events)
+
+
+@pytest.mark.usefixtures("fake_runners")
+async def test_cancelling_a_queued_run_never_starts_it(
+    config_path: Path, config_dict: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = _config(config_dict)
+    tracker = fakes.FakeTracker({"PROJ-1": fakes.issue("PROJ-1"), "PROJ-2": fakes.issue("PROJ-2")})
+    store = Store(cfg.db_path)
+    runs = RunManager(cfg, config_path, store, tracker_factory=lambda: tracker)
+    agents = _Hanging(monkeypatch)
+    first = await runs.submit(["PROJ-1"], workflow=None, dry_run=True, client="test")
+    await asyncio.wait_for(agents.started.wait(), 30)
+    second = await runs.submit(["PROJ-2"], workflow=None, dry_run=True, client="test")
+    await runs.cancel(second.run_id, client="test")
+    assert store.get_run(second.run_id).status == "cancelled"
+    assert _states(store, second.run_id) == {"PROJ-2": "QUEUED"}
+    assert store.get_run(first.run_id).status == "running"
+    await runs.shutdown()
+
+
+@pytest.mark.usefixtures("fake_runners")
+async def test_retry_reopens_failed_tasks(config_path: Path, config_dict: dict) -> None:
+    cfg = _config(config_dict)
+    tracker = fakes.FakeTracker({"PROJ-1": fakes.issue("PROJ-1"), "PROJ-2": fakes.issue("PROJ-2")})
+    store = Store(cfg.db_path)
+    store.create_run("r1", config_path, ["PROJ-1", "PROJ-2"], True)
+    store.save_task("r1", TaskState(key="PROJ-1", state="DONE"))
+    failed = TaskState(key="PROJ-2", summary="Do the thing")
+    failed.transition("CONTEXT")
+    failed.error = "boom"
+    failed.transition("FAILED")
+    store.save_task("r1", failed)
+    store.release_run("r1", "finished")
+    runs = RunManager(cfg, config_path, store, tracker_factory=lambda: tracker)
+    with pytest.raises(runs_module.ControlError, match="nothing to resume"):
+        await runs.resume("r1", client="test")
+    resumed = await runs.resume("r1", retry_failed=True, client="test")
+    assert resumed.keys == ["PROJ-1", "PROJ-2"]
+    await asyncio.wait_for(runs.wait("r1"), 120)
+    assert _states(store, "r1") == {"PROJ-1": "DONE", "PROJ-2": "DONE"}
+
+
+@pytest.mark.usefixtures("fake_runners")
+async def test_resume_on_start_picks_up_only_interrupted_daemon_runs(
+    config_path: Path, config_dict: dict
+) -> None:
+    cfg = _config(config_dict, resume_on_start=True)
+    keys = ["PROJ-1", "PROJ-2", "PROJ-3"]
+    tracker = fakes.FakeTracker({k: fakes.issue(k) for k in keys})
+    store = Store(cfg.db_path)
+    for run_id, key, via, status in (
+        ("r-daemon", "PROJ-1", "daemon", "interrupted"),
+        ("r-cancelled", "PROJ-2", "daemon", "cancelled"),
+        ("r-cli", "PROJ-3", "cli", "interrupted"),
+    ):
+        store.create_run(run_id, config_path, [key], True, via=via)  # type: ignore[arg-type]
+        store.save_task(run_id, TaskState(key=key, summary="Do the thing"))
+        store.release_run(run_id, status)  # type: ignore[arg-type]
+    runs = RunManager(cfg, config_path, store, tracker_factory=lambda: tracker)
+    assert await runs.resume_interrupted() == ["r-daemon"]
+    await asyncio.wait_for(runs.wait("r-daemon"), 120)
+    assert _states(store, "r-daemon") == {"PROJ-1": "DONE"}
+    assert store.get_run("r-cancelled").status == "cancelled"
+    assert store.get_run("r-cli").status == "interrupted"
+
+
+def test_a_cli_claim_records_the_cli(tmp_path: Path) -> None:
+    store = Store(tmp_path / "state.db")
+    store.create_run("r1", Path("c.yaml"), [], False, via="daemon")
+    store.release_run("r1", "interrupted")
+    store.claim_run("r1")
+    assert store.get_run("r1").via == "cli"
 
 
 # --- the pipeline records agent invocations -----------------------------------------------
@@ -355,14 +659,25 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
-async def test_daemon_serves_locks_and_stops(config_dict: dict, config_path: Path, tmp_path: Path) -> None:
+@pytest.mark.usefixtures("fake_runners")
+async def test_daemon_serves_runs_locks_and_stops(
+    config_dict: dict, config_path: Path, tmp_path: Path
+) -> None:
     cfg = _config(config_dict)
     web = daemon.effective_web(cfg, None, _free_port())
     ready: list = []
     said: list[str] = []
+    tracker = fakes.FakeTracker({"PROJ-1": fakes.issue("PROJ-1")})
     serving = asyncio.create_task(
         daemon.serve(
-            cfg, config_path, tmp_path, web=web, checks=False, say=said.append, on_ready=ready.append
+            cfg,
+            config_path,
+            tmp_path,
+            web=web,
+            checks=False,
+            say=said.append,
+            on_ready=ready.append,
+            tracker_factory=lambda: tracker,
         )
     )
     for _ in range(200):
@@ -376,6 +691,14 @@ async def test_daemon_serves_locks_and_stops(config_dict: dict, config_path: Pat
     async with httpx.AsyncClient(base_url=record.url) as client:
         assert (await client.get("/api/agents")).json()["agents"] == []
         assert (await client.get("/api/health")).json()["status"] == "ok"
+        r = await client.post("/api/runs", json={"keys": ["PROJ-1"], "dry_run": True})
+        assert r.status_code == 202, r.text
+        for _ in range(1200):
+            run = (await client.get("/api/runs")).json()["runs"][0]
+            if run["status"] == "finished":
+                break
+            await asyncio.sleep(0.1)
+        assert run["status"] == "finished" and run["tasks"] == {"DONE": 1}, run
     # a second daemon on the same state directory refuses to start
     assert await daemon.serve(cfg, config_path, tmp_path, web=web, checks=False, say=said.append) == 1
     assert any("already serving" in s for s in said)
@@ -383,3 +706,46 @@ async def test_daemon_serves_locks_and_stops(config_dict: dict, config_path: Pat
     ready[0].should_exit = True
     assert await asyncio.wait_for(serving, 30) == 0
     assert daemon.read_record(cfg) is None
+
+
+@pytest.mark.usefixtures("fake_runners")
+async def test_shutdown_from_the_page_interrupts_runs_and_stops_the_daemon(
+    config_dict: dict, config_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = _config(config_dict)
+    web = daemon.effective_web(cfg, None, _free_port())
+    ready: list = []
+    said: list[str] = []
+    agents = _Hanging(monkeypatch)
+    tracker = fakes.FakeTracker({"PROJ-1": fakes.issue("PROJ-1")})
+    serving = asyncio.create_task(
+        daemon.serve(
+            cfg,
+            config_path,
+            tmp_path,
+            web=web,
+            checks=False,
+            say=said.append,
+            on_ready=ready.append,
+            tracker_factory=lambda: tracker,
+        )
+    )
+    for _ in range(200):
+        if ready or serving.done():
+            break
+        await asyncio.sleep(0.05)
+    assert ready, said
+    url = daemon.read_record(cfg).url
+    async with httpx.AsyncClient(base_url=url) as client:
+        run_id = (await client.post("/api/runs", json={"keys": ["PROJ-1"], "dry_run": True})).json()["run_id"]
+        await asyncio.wait_for(agents.started.wait(), 30)
+        r = await client.post("/api/shutdown", json={})
+        assert r.status_code == 202 and r.json() == {"status": "stopping", "interrupted": [run_id]}
+    assert await asyncio.wait_for(serving, 30) == 0
+    assert daemon.read_record(cfg) is None
+    assert any("shutdown requested from 127.0.0.1" in line for line in said)
+    store = Store(cfg.db_path)
+    assert store.get_run(run_id).status == "interrupted"
+    assert store.latest_agents(run_id)[("PROJ-1", "worker")].termination == "killed"
+    audit = (cfg.runs_dir / run_id / "audit.jsonl").read_text()
+    assert '"event": "daemon_shutdown"' in audit and '"client": "127.0.0.1"' in audit

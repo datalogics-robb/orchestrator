@@ -56,9 +56,14 @@ CREATE INDEX IF NOT EXISTS agents_run ON agents (run_id, key, role);
 """
 
 # columns added to runs after the first release; an existing state.db gains them in place
-_RUN_COLUMNS = {"owner": "TEXT", "heartbeat": "TEXT", "status": "TEXT"}
+_RUN_COLUMNS = {"owner": "TEXT", "heartbeat": "TEXT", "status": "TEXT", "via": "TEXT"}
 
-RunStatus = Literal["running", "paused", "interrupted", "finished"]
+RunStatus = Literal["queued", "running", "paused", "interrupted", "cancelled", "finished"]
+"""`interrupted`: its process stopped or died mid-run. `cancelled`: the operator stopped it on purpose."""
+RunVia = Literal["cli", "daemon"]
+"""What last drove a run; a daemon resumes on start only the runs a daemon was driving."""
+LIVE_STATUSES = frozenset({"queued", "running"})
+"""Statuses whose owner must keep its heartbeat fresh; a silent owner means the run was interrupted."""
 
 HEARTBEAT_SECONDS = 15
 STALE_AFTER = timedelta(seconds=60)
@@ -96,6 +101,7 @@ class RunRow:
     owner: str | None = None
     heartbeat: str | None = None
     status: RunStatus | None = None
+    via: RunVia | None = None
 
 
 @dataclass
@@ -123,8 +129,8 @@ def effective_status(run: RunRow, *, any_paused: bool = False, now: datetime | N
     Runs recorded before ownership was tracked have no status; `any_paused` says whether one of
     their tasks waits for approval.
     """
-    if run.status == "running":
-        return "running" if heartbeat_fresh(run.heartbeat, now) else "interrupted"
+    if run.status in LIVE_STATUSES:
+        return run.status if heartbeat_fresh(run.heartbeat, now) else "interrupted"
     if run.status:
         return run.status
     if run.finished:
@@ -133,7 +139,7 @@ def effective_status(run: RunRow, *, any_paused: bool = False, now: datetime | N
 
 
 _RUN_SELECT = (
-    "SELECT run_id, started, finished, config_path, keys, dry_run, owner, heartbeat, status FROM runs"
+    "SELECT run_id, started, finished, config_path, keys, dry_run, owner, heartbeat, status, via FROM runs"
 )
 _AGENT_SELECT = (
     "SELECT id, run_id, key, role, label, runner, model, started, ended, ok, termination, cost_usd, turns, "
@@ -142,7 +148,7 @@ _AGENT_SELECT = (
 
 
 def _run_row(r: tuple) -> RunRow:
-    return RunRow(r[0], r[1], r[2], r[3], json.loads(r[4]), bool(r[5]), r[6], r[7], r[8])
+    return RunRow(r[0], r[1], r[2], r[3], json.loads(r[4]), bool(r[5]), r[6], r[7], r[8], r[9])
 
 
 def _agent_row(r: tuple) -> AgentRow:
@@ -192,15 +198,23 @@ class Store:
 
     # runs
 
-    def create_run(self, run_id: str, config_path: Path, keys: list[str], dry_run: bool) -> None:
+    def create_run(
+        self,
+        run_id: str,
+        config_path: Path,
+        keys: list[str],
+        dry_run: bool,
+        status: RunStatus = "running",
+        via: RunVia = "cli",
+    ) -> None:
         now = _now()
         self._write(
             "INSERT OR REPLACE INTO runs (run_id, started, finished, config_path, keys, dry_run, owner, heartbeat, "
-            "status) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, 'running')",
-            (run_id, now, str(config_path), json.dumps(keys), int(dry_run), this_process(), now),
+            "status, via) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)",
+            (run_id, now, str(config_path), json.dumps(keys), int(dry_run), this_process(), now, status, via),
         )
 
-    def claim_run(self, run_id: str) -> None:
+    def claim_run(self, run_id: str, status: RunStatus = "running", via: RunVia = "cli") -> None:
         """Take ownership of an existing run for this process; refuses a run another live process drives."""
         me = this_process()
         with self._lock:
@@ -209,12 +223,13 @@ class Store:
             ).fetchone()
             if row is None:
                 raise KeyError(run_id)
-            owner, heartbeat, status = row
-            if status == "running" and owner != me and heartbeat_fresh(heartbeat):
+            owner, heartbeat, current = row
+            if current in LIVE_STATUSES and owner != me and heartbeat_fresh(heartbeat):
                 raise RunInUse(f"run {run_id} is being driven by {owner} (last seen {heartbeat})")
             self._conn.execute(
-                "UPDATE runs SET owner = ?, heartbeat = ?, status = 'running', finished = NULL WHERE run_id = ?",
-                (me, _now(), run_id),
+                "UPDATE runs SET owner = ?, heartbeat = ?, status = ?, via = ?, finished = NULL "
+                "WHERE run_id = ?",
+                (me, _now(), status, via, run_id),
             )
             self._conn.commit()
 

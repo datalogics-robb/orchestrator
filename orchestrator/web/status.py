@@ -16,7 +16,17 @@ from orchestrator.pipeline.task import TaskState
 from orchestrator.state.store import AgentRow, RunRow, RunStatus, Store, effective_status
 
 AgentStatus = Literal[
-    "running", "orphaned", "needs approval", "waiting", "idle", "interrupted", "done", "blocked", "failed"
+    "running",
+    "orphaned",
+    "needs approval",
+    "waiting",
+    "idle",
+    "queued",
+    "interrupted",
+    "cancelled",
+    "done",
+    "blocked",
+    "failed",
 ]
 
 ORDER: dict[str, int] = {
@@ -28,7 +38,9 @@ ORDER: dict[str, int] = {
             "needs approval",
             "waiting",
             "idle",
+            "queued",
             "interrupted",
+            "cancelled",
             "done",
             "blocked",
             "failed",
@@ -102,8 +114,12 @@ def role_status(role: str, task: TaskState, latest: AgentRow | None, run_status:
         return task.state.lower()  # type: ignore[return-value]
     if task.paused:
         return "needs approval" if role == "worker" else "idle"
+    if run_status == "queued":
+        return "queued"
     if run_status == "interrupted":
         return "interrupted"
+    if run_status == "cancelled":
+        return "cancelled"
     if run_status != "running":
         return "idle"  # a paused run's other tasks wait for the resume
     next_states = WORKER_STATES if role == "worker" else REVIEWER_STATES
@@ -152,11 +168,11 @@ def rows_for(snapshot: RunSnapshot, cfg: Config, now: datetime) -> list[AgentVie
 
 
 def in_scope(snapshot: RunSnapshot, recent: timedelta, now: datetime) -> bool:
-    """Running and paused runs always show; finished and interrupted ones while recently active."""
+    """Queued, running, and paused runs always show; finished and interrupted ones while recently active."""
     status = effective_status(
         snapshot.run, any_paused=any(t.paused for t in snapshot.tasks.values()), now=now
     )
-    if status in ("running", "paused"):
+    if status in ("queued", "running", "paused"):
         return True
     last = snapshot.last_activity or snapshot.run.heartbeat or snapshot.run.finished or snapshot.run.started
     return now - datetime.fromisoformat(last) <= recent
@@ -181,3 +197,82 @@ def agent_rows(store: Store, cfg: Config, now: datetime | None = None, scan: int
         if in_scope(snapshot, recent, now):
             rows.extend(rows_for(snapshot, cfg, now))
     return sorted(rows, key=sort_key)
+
+
+RunAction = Literal["cancel", "resume", "retry-failed", "retry-blocked"]
+
+
+def resumable(tasks: dict[str, TaskState]) -> bool:
+    """Some task would move if the run were driven again (paused ones wait for an approval instead)."""
+    return any(not t.terminal and not t.paused for t in tasks.values())
+
+
+def run_actions(status: RunStatus, tasks: dict[str, TaskState], driven_here: bool) -> list[RunAction]:
+    """What the operator can do to a run from the page.
+
+    A queued or running run can be cancelled only by the daemon driving it; one that nothing drives
+    can be resumed while a task would move, and retried while it holds FAILED or BLOCKED tasks.
+    """
+    if status in ("queued", "running"):
+        return ["cancel"] if driven_here else []
+    actions: list[RunAction] = []
+    if status in ("interrupted", "cancelled") and resumable(tasks):
+        actions.append("resume")
+    states = {t.state for t in tasks.values()}
+    if "FAILED" in states:
+        actions.append("retry-failed")
+    if "BLOCKED" in states:
+        actions.append("retry-blocked")
+    return actions
+
+
+class RunView(BaseModel):
+    run_id: str
+    status: RunStatus
+    dry_run: bool
+    started: str
+    finished: str | None
+    keys: list[str]
+    """What was asked for; an epic's children are the tasks."""
+    owner: str | None
+    by_this_daemon: bool
+    """False for runs started with `orchestrator run` or by another daemon; the page cannot control them."""
+    tasks: dict[str, int]
+    """Task count per task state."""
+    cost_usd: float
+    actions: list[RunAction]
+
+
+class RunsResponse(BaseModel):
+    generated_at: str
+    runs: list[RunView]
+
+
+def run_views(
+    store: Store, owner: str, driven: set[str], now: datetime | None = None, limit: int = 20
+) -> list[RunView]:
+    """The most recent runs, newest first. `owner` is this daemon's owner string; `driven`, the runs it drives."""
+    now = now or datetime.now(UTC)
+    out: list[RunView] = []
+    for run in store.list_runs(limit):
+        tasks = store.load_tasks(run.run_id)
+        counts: dict[str, int] = {}
+        for t in tasks.values():
+            counts[t.state] = counts.get(t.state, 0) + 1
+        status = effective_status(run, any_paused=any(t.paused for t in tasks.values()), now=now)
+        out.append(
+            RunView(
+                run_id=run.run_id,
+                status=status,
+                dry_run=run.dry_run,
+                started=run.started,
+                finished=run.finished,
+                keys=run.keys,
+                owner=run.owner,
+                by_this_daemon=run.owner == owner,
+                tasks=counts,
+                cost_usd=round(sum(t.cost_usd for t in tasks.values()), 2),
+                actions=run_actions(status, tasks, run.run_id in driven),
+            )
+        )
+    return out

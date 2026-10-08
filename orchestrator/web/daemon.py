@@ -1,4 +1,4 @@
-"""`orchestrator serve`: one long-lived process per config, serving the status page over HTTP.
+"""`orchestrator serve`: one long-lived process per config, serving the page and driving submitted runs.
 
 The daemon holds an exclusive lock on `<state_dir>/serve.pid` for its whole life, so a second
 daemon on the same state directory refuses to start. The pidfile holds JSON naming the pid, host,
@@ -31,7 +31,9 @@ from orchestrator.config.schema import Config, WebConfig
 from orchestrator.doctor import Check, check_agents_live, check_remote, run_doctor
 from orchestrator.pipeline.runtime import redactor_for
 from orchestrator.state.store import Store
+from orchestrator.trackers.base import Tracker
 from orchestrator.web.api import Health, create_app
+from orchestrator.web.runs import RunManager
 from orchestrator.web.status import DaemonInfo
 
 PIDFILE = "serve.pid"
@@ -137,18 +139,23 @@ class _Server(uvicorn.Server):
                 signal.signal(sig, handler)
 
 
+async def probe_logins(cfg: Config, health: Health) -> list[Check]:
+    """Each role's live login probe, recorded in `health`. Returns every check the probes produced."""
+    live = await check_agents_live(cfg)
+    for role in ("worker", "reviewer"):
+        area = f"agents.{role}"
+        mine = [c for c in live if c.area == area]
+        if mine:
+            failures = [c.detail for c in mine if c.status == "fail"]
+            health.record(role, cfg.agents.role(role).runner, failures)  # type: ignore[arg-type]
+    return live
+
+
 async def startup_checks(cfg: Config, repo_root: Path, health: Health, *, online: bool) -> list[Check]:
     """Doctor's checks, recording each probed login in `health`. Returns the failures."""
     checks = await run_doctor(cfg, repo_root, online=False)
     if online:
-        live = await check_agents_live(cfg)
-        for role in ("worker", "reviewer"):
-            area = f"agents.{role}"
-            mine = [c for c in live if c.area == area]
-            if mine:
-                failures = [c.detail for c in mine if c.status == "fail"]
-                health.record(role, cfg.agents.role(role).runner, failures)  # type: ignore[arg-type]
-        checks += live + await check_remote(cfg)
+        checks += await probe_logins(cfg, health) + await check_remote(cfg)
     return [c for c in checks if c.status == "fail"]
 
 
@@ -162,8 +169,12 @@ async def serve(
     online: bool = True,
     say: Callable[[str], None] = print,
     on_ready: Callable[[_Server], None] | None = None,
+    tracker_factory: Callable[[], Tracker] | None = None,
 ) -> int:
-    """Run the daemon until SIGTERM or SIGINT. Returns the process exit code."""
+    """Run the daemon until SIGTERM or SIGINT. Returns the process exit code.
+
+    `tracker_factory` replaces the Jira client of submitted runs (tests use a fake).
+    """
     token = resolve_secret(web.auth) if web.auth else None
     lock = PidLock(pidfile(cfg))
     if not lock.acquire():
@@ -190,7 +201,27 @@ async def serve(
             config=str(config_path),
             repo=cfg.repo.github,
         )
-        app = create_app(cfg, web, store, redactor_for(cfg), info, health, token)
+
+        async def login_probe() -> list[str]:
+            return [f"{c.area}: {c.detail}" for c in await probe_logins(cfg, health) if c.status == "fail"]
+
+        runs = RunManager(
+            cfg,
+            config_path,
+            store,
+            login_probe=login_probe if online else None,
+            tracker_factory=tracker_factory,
+        )
+        if checks and online:
+            runs.last_login_ok = time.monotonic()  # the startup probe just passed
+        stopped_by: list[str] = []
+
+        def request_shutdown(client: str) -> None:
+            say(f"shutdown requested from {client}")
+            stopped_by.append(client)
+            server.should_exit = True
+
+        app = create_app(cfg, web, store, redactor_for(cfg), info, health, token, runs, request_shutdown)
         server = _Server(
             uvicorn.Config(
                 app,
@@ -205,6 +236,10 @@ async def serve(
         )
         url = url_for(web, web.port)
         lock.write(DaemonRecord(os.getpid(), info.host, web.port, url, ready=False))
+        runs.start()
+        if cfg.web.resume_on_start:
+            for run_id in await runs.resume_interrupted():
+                say(f"resuming run {run_id}")
         task = asyncio.create_task(server.serve())
         while not server.started and not task.done():
             await asyncio.sleep(0.05)
@@ -217,7 +252,10 @@ async def serve(
                 )
             if on_ready:
                 on_ready(server)
-        await task
+        try:
+            await task
+        finally:
+            await runs.shutdown(client=stopped_by[0] if stopped_by else None)
         store.close()
         return 0 if server.started else 1
     finally:

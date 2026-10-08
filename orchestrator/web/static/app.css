@@ -56,7 +56,8 @@ body {
 }
 .brand .name { font-weight: 650; font-size: 17px; }
 .brand .repo { color: var(--muted); margin-left: 10px; font-family: var(--mono); font-size: 13px; }
-.meta { display: flex; gap: 16px; color: var(--muted); font-size: 12.5px; }
+.meta { display: flex; gap: 16px; align-items: baseline; color: var(--muted); font-size: 12.5px; }
+.banner.stopped { background: var(--quiet-bg); color: var(--text); }
 .stale {
   color: var(--bad);
   background: var(--bad-bg);
@@ -141,11 +142,72 @@ table.agents { width: 100%; border-collapse: collapse; }
 }
 .chip.running { background: var(--running-bg); color: var(--running); }
 .chip.running::before { content: "● "; }
+.chip.queued { background: var(--quiet-bg); color: var(--text); }
+.chip.paused { background: var(--attention-bg); color: var(--attention); }
+.chip.finished { background: var(--running-bg); color: var(--running); }
 .chip.orphaned, .chip.interrupted { background: var(--warn-bg); color: var(--warn); }
 .chip.needs-approval { background: var(--attention-bg); color: var(--attention); }
 .chip.done { background: var(--running-bg); color: var(--running); }
 .chip.blocked { background: var(--warn-bg); color: var(--warn); }
 .chip.failed { background: var(--bad-bg); color: var(--bad); }
+
+.submit {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 14px;
+  align-items: flex-end;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 14px 16px;
+  margin-bottom: 16px;
+}
+.field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+.field.keys { flex: 1 1 280px; }
+.field input, .field select {
+  font: inherit;
+  font-size: 14px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 6px 10px;
+}
+.field input { font-family: var(--mono); font-size: 13px; }
+.check { display: flex; gap: 6px; align-items: center; padding-bottom: 7px; }
+button.primary {
+  font: inherit;
+  font-weight: 600;
+  color: var(--surface);
+  background: var(--accent);
+  border: 0;
+  border-radius: 6px;
+  padding: 7px 16px;
+  cursor: pointer;
+}
+button.primary:disabled { opacity: 0.55; cursor: default; }
+.hint, .result { flex-basis: 100%; margin: 0; font-size: 12.5px; color: var(--muted); }
+.hint.live { color: var(--warn); }
+.result.ok { color: var(--running); }
+.result.bad { color: var(--bad); }
+#runs-result { margin-bottom: 10px; }
+.actions { display: flex; gap: 6px; }
+button.action {
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--accent);
+  background: none;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 2px 10px;
+  cursor: pointer;
+}
+button.action:hover { border-color: var(--accent); }
+button.action.cancel { color: var(--bad); }
+button.action.cancel:hover { border-color: var(--bad); }
+button.action:disabled { opacity: 0.55; cursor: default; }
+.chip.cancelled { background: var(--quiet-bg); color: var(--muted); }
+.runs .keys, .runs .tasks { white-space: normal; font-family: var(--mono); font-size: 12.5px; }
 
 .empty { color: var(--muted); padding: 24px; margin: 0; text-align: center; }
 code { font-family: var(--mono); font-size: 12.5px; }
