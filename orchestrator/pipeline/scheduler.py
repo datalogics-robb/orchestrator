@@ -93,10 +93,13 @@ async def run_task(rt: Runtime, spec: TaskSpec, task: TaskState) -> TaskState:
         return task
     rt.event(task.key, task.state, task.error or task.pr_url or "")
     # a dry run's result exists only in its worktree, so it is always kept
-    if task.state == "DONE" and task.worktree_path and not (rt.keep_worktrees or rt.dry_run):
-        from pathlib import Path
+    if task.state == "DONE" and not (rt.keep_worktrees or rt.dry_run):
+        if task.worktree_path:
+            from pathlib import Path
 
-        await rt.worktrees.remove(Path(task.worktree_path))
+            await rt.worktrees.remove(Path(task.worktree_path))
+        if task.node:
+            await rt.remote.clean(rt, task)
     return task
 
 

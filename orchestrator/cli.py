@@ -7,8 +7,10 @@ import re
 import shutil
 import sys
 import time
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import typer
 from rich.console import Console
@@ -19,6 +21,7 @@ from orchestrator import __version__
 from orchestrator.config.loader import ConfigError, load_config
 from orchestrator.config.schema import Config
 from orchestrator.intake.base import KEY_PATTERN
+from orchestrator.remote.client import Machine, NodeClient, NodeError, machines
 from orchestrator.state.store import HEARTBEAT_SECONDS, RunInUse, RunStatus, Store, effective_status
 
 HELP = """\
@@ -139,6 +142,7 @@ mcp:
 
 build:
   setup: []                                    # e.g. ["python mkenv.py"] for a Python target
+  local_setup: []                              # what the host needs when the build runs on a platform machine
   commands: []                                 # e.g. ["make -j8 debug"]
   timeout_minutes: 40
   env: {}
@@ -195,6 +199,15 @@ hooks:
   after_worktree: []
   before_pr: []
 
+# platforms:                            # build machines for `run --platform NAME`, reached over ssh
+#   linux-armv8:
+#     aliases: [aarch64, arm64]
+#     ssh: {user: builder, identity_file: ~/.ssh/build_key}
+#     root: /home/builder/orchestrator    # task directories and the node script
+#     checkout: /home/builder/repo        # optional clone to start task directories from
+#     max_concurrent_builds: 1
+#     nodes: [{host: arm-build-01}, {host: arm-build-02}]
+
 web:                                    # `orchestrator serve`: the status page and control
   host: 127.0.0.1                       # any other address requires auth
   port: 8765
@@ -206,6 +219,22 @@ web:                                    # `orchestrator serve`: the status page 
   max_concurrent_runs: 1                # runs submitted from the page beyond this wait their turn
   resume_on_start: false                # true: a restarted daemon picks up the runs it was driving
 """
+
+
+PLATFORM_OPTION = typer.Option(
+    None,
+    "--platform",
+    help="Pin new tasks to a platform under `platforms`: their setup, build, red check, and tests run on one of "
+    "its build machines over ssh, while the agents stay here. `local` keeps them here. On resume it applies only "
+    "to tasks not yet pinned.",
+)
+
+
+def _check_platform(cfg: Config, platform: str | None) -> None:
+    if platform and platform != "local" and platform not in cfg.platforms:
+        known = ", ".join(["local", *cfg.platforms])
+        err.print(f"[red]--platform {platform}: not configured; known: {known}[/red]")
+        raise typer.Exit(2)
 
 
 def _load(config: Path) -> Config:
@@ -318,6 +347,7 @@ async def _run(
     approve: str | None = None,
     revise: str | None = None,
     decisions: str = "",
+    platform: str | None = None,
 ) -> int:
     from orchestrator.intake.base import ExplicitKeys
     from orchestrator.pipeline import feature
@@ -325,7 +355,9 @@ async def _run(
     from orchestrator.pipeline.scheduler import reopen_for_retry, run_all
     from orchestrator.reporting.run_report import run_report_markdown, write_run_report
 
-    rt = build_runtime(cfg, config, run_id=resume_id, dry_run=dry_run, keep_worktrees=keep_worktrees)
+    rt = build_runtime(
+        cfg, config, run_id=resume_id, dry_run=dry_run, keep_worktrees=keep_worktrees, platform=platform
+    )
     existing = {}
     if resume_id:
         row = rt.store.get_run(resume_id)
@@ -463,6 +495,7 @@ def run(
         help="Fetch the issue and Confluence context, print the rendered worker prompt, and exit without "
         "creating a worktree or running an agent.",
     ),
+    platform: str | None = PLATFORM_OPTION,
     workflow: str = typer.Option(
         "auto",
         "--workflow",
@@ -490,6 +523,7 @@ def run(
         err.print(f"[red]not Jira keys: {', '.join(bad)}; expected the form PROJ-123[/red]")
         raise typer.Exit(2)
     cfg = _load(config)
+    _check_platform(cfg, platform)
     if max_parallel:
         cfg = cfg.model_copy(
             update={"scheduler": cfg.scheduler.model_copy(update={"max_parallel": max_parallel})}
@@ -504,6 +538,7 @@ def run(
             resume_id=None,
             show_prompt=show_prompt,
             workflow=None if workflow == "auto" else workflow,
+            platform=platform,
         )
     )
     raise typer.Exit(code)
@@ -548,6 +583,7 @@ def resume(
         help="Send a paused feature task's specification (AWAITING_APPROVAL) or tests (RED_REVIEW) back to be "
         "rewritten. Requires --decisions saying what to change.",
     ),
+    platform: str | None = PLATFORM_OPTION,
     decisions: Path | None = typer.Option(
         None,
         "--decisions",
@@ -566,6 +602,7 @@ def resume(
     --dry-run stays a dry run.
     """
     cfg = _load(config)
+    _check_platform(cfg, platform)
     if revise and decisions is None:
         err.print("[red]--revise needs --decisions FILE with what to change[/red]")
         raise typer.Exit(2)
@@ -587,6 +624,7 @@ def resume(
             approve=approve.upper() if approve else None,
             revise=revise.upper() if revise else None,
             decisions=decisions.read_text(encoding="utf-8") if decisions else "",
+            platform=platform,
         )
     )
     raise typer.Exit(code)
@@ -747,6 +785,159 @@ def clean(
 
     asyncio.run(go())
     console.print(f"removed {len(victims)} item(s)")
+
+
+nodes_app = typer.Typer(
+    help="Build machines under `platforms`: check them, install the node script, clean up."
+)
+app.add_typer(nodes_app, name="nodes")
+
+
+def _selected_machines(cfg: Config, which: str | None) -> list[Machine]:
+    out: list[Machine] = []
+    for name, pcfg in cfg.platforms.items():
+        for m in machines(name, pcfg):
+            if which in (None, name, m.host):
+                out.append(m)
+    if not out:
+        err.print(
+            f"[red]no build machines match {which!r}[/red]" if which else "[red]no platforms configured[/red]"
+        )
+        raise typer.Exit(2)
+    return out
+
+
+def _gib(n: object) -> str:
+    return f"{int(n) / 2**30:.0f} GiB" if isinstance(n, int) else "?"
+
+
+@nodes_app.command("check")
+def nodes_check(
+    which: str | None = typer.Argument(None, help="A platform name or host; omit for every machine."),
+    config: Path = CONFIG_OPTION,
+) -> None:
+    """Connect to each build machine and report what the orchestrator needs from it.
+
+    Read-only: it runs the node script's `info` and changes nothing. A machine without the node
+    script, or with an older one, is reported; `orchestrator nodes install` fixes that.
+    """
+    from orchestrator.remote.node import VERSION
+
+    cfg = _load(config)
+    selected = _selected_machines(cfg, which)
+    repo_name = cfg.repo.github.rsplit("/", 1)[-1]
+
+    async def probe(m: Machine) -> dict[str, Any] | NodeError:
+        try:
+            return await NodeClient(m).info()
+        except NodeError as e:
+            return e
+
+    answers = asyncio.run(_each(probe, selected))
+    table = Table(title="build machines")
+    for col in ("platform", "host", "status", "arch", "python", "free", "jobs", "checkout"):
+        table.add_column(col)
+    failures = 0
+    for m, info in zip(selected, answers, strict=True):
+        if isinstance(info, Exception):
+            missing = "No such file" in str(info) or "can't open file" in str(info)
+            status = (
+                "[yellow]node script missing: run nodes install[/yellow]" if missing else f"[red]{info}[/red]"
+            )
+            failures += 0 if missing else 1
+            table.add_row(m.platform, m.host, status, "", "", "", "", m.checkout or "")
+            continue
+        status = "[green]ok[/green]"
+        if info.get("version", 0) < VERSION:
+            status = "[yellow]node script outdated: run nodes install[/yellow]"
+        checkout = info.get("checkout") or {}
+        note = ""
+        if m.checkout:
+            if not checkout.get("exists"):
+                note, failures = f"[red]{m.checkout} missing[/red]", failures + 1
+            elif repo_name not in str(checkout.get("remote", "")):
+                note = f"[yellow]{m.checkout} ({checkout.get('remote')}: not {repo_name}?)[/yellow]"
+            else:
+                note = f"{m.checkout} ({checkout.get('remote')})"
+        table.add_row(
+            m.platform,
+            m.host,
+            status,
+            str(info.get("arch", "")),
+            str(info.get("python", "")),
+            _gib(info.get("free_bytes")),
+            str(info.get("running_jobs", "")),
+            note or "none (first sync sends every file)",
+        )
+    console.print(table)
+    raise typer.Exit(1 if failures else 0)
+
+
+async def _each[T](fn: Callable[[Machine], Awaitable[T]], selected: list[Machine]) -> list[T]:
+    return list(await asyncio.gather(*(fn(m) for m in selected)))
+
+
+@nodes_app.command("install")
+def nodes_install(
+    which: str | None = typer.Argument(None, help="A platform name or host; omit for every machine."),
+    config: Path = CONFIG_OPTION,
+) -> None:
+    """Copy the node script to `<root>/node.py` on each build machine (creating the root)."""
+    cfg = _load(config)
+    selected = _selected_machines(cfg, which)
+
+    async def install(m: Machine) -> NodeError | None:
+        try:
+            await NodeClient(m).install()
+            return None
+        except NodeError as e:
+            return e
+
+    failures = 0
+    for m, problem in zip(selected, asyncio.run(_each(install, selected)), strict=True):
+        if problem:
+            failures += 1
+            err.print(f"[red]{m.host}: {problem}[/red]")
+        else:
+            console.print(f"{m.host}: installed {m.script}")
+    raise typer.Exit(1 if failures else 0)
+
+
+@nodes_app.command("clean")
+def nodes_clean(
+    which: str | None = typer.Argument(None, help="A platform name or host; omit for every machine."),
+    older_than: str = typer.Option(
+        "7d", "--older-than", help="Age threshold: a number followed by d (days), h (hours), or m (minutes)."
+    ),
+    config: Path = CONFIG_OPTION,
+    yes: bool = typer.Option(False, "--yes", "-y", help="Do not ask for confirmation."),
+) -> None:
+    """Remove task directories older than the threshold from the build machines' roots.
+
+    Only `<root>/<run>/` directories are touched, along with their worktree registrations in
+    the checkout; the checkout itself is left alone.
+    """
+    cfg = _load(config)
+    selected = _selected_machines(cfg, which)
+    days = _parse_age(older_than).total_seconds() / 86400
+    hosts = ", ".join(f"{m.host}:{m.root}" for m in selected)
+    if not yes and not typer.confirm(f"Remove run directories older than {older_than} under {hosts}?"):
+        raise typer.Exit(1)
+
+    async def clean(m: Machine) -> dict[str, Any] | NodeError:
+        try:
+            return await NodeClient(m).clean_older_than(days)
+        except NodeError as e:
+            return e
+
+    failures = 0
+    for m, result in zip(selected, asyncio.run(_each(clean, selected)), strict=True):
+        if isinstance(result, Exception):
+            failures += 1
+            err.print(f"[red]{m.host}: {result}[/red]")
+        else:
+            console.print(f"{m.host}: removed {len(result['removed'])} run director(ies)")
+    raise typer.Exit(1 if failures else 0)
 
 
 @app.command()

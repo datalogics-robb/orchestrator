@@ -56,6 +56,14 @@ class TaskState:
     branch: str | None = None
     worktree_path: str | None = None
     base_sha: str | None = None
+    platform: str | None = None
+    """The configured platform whose build machine runs this task's gates; None builds locally."""
+    platform_trigger: Literal["operator", ""] = ""
+    """Why the task is pinned: `operator` means `--platform` (the bug-report triggers come later)."""
+    node: str | None = None
+    """The build machine (host) the task is pinned to, kept for the task's whole life."""
+    node_tree: str | None = None
+    """The git tree id the machine's copy of the worktree matches, after the last sync."""
     spec: dict[str, Any] | None = None
     """Feature workflow: the specification the worker produced (acceptance criteria, API, tests)."""
     spec_review: dict[str, Any] | None = None

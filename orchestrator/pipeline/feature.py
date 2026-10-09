@@ -22,7 +22,6 @@ from orchestrator.agents.contracts import (
     parse_spec,
     parse_worker,
 )
-from orchestrator.build.runner import run_step
 from orchestrator.build.selection import selector_for
 from orchestrator.intake.base import TaskSpec
 from orchestrator.pipeline import stages
@@ -209,16 +208,14 @@ async def stage_red_check(rt: Runtime, spec: TaskSpec, task: TaskState) -> State
     """Build the tests, run them, require them to fail for the right reason, and commit them as the red commit."""
     wt = stages._worktree(rt, task)
     cfg = rt.cfg.workflows.feature
-    env = stages._build_env(rt, task, wt.path)
-    log_dir = rt.task_dir(task.key) / "logs"
     if rt.cfg.build.commands:
-        build = await run_step(
+        build = await stages.run_gate(
+            rt,
+            task,
+            wt,
             f"red-build-r{task.round}",
             rt.cfg.build.commands,
-            cwd=wt.path,
-            env=env,
             timeout_seconds=rt.cfg.build.timeout_minutes * 60,
-            log_dir=log_dir,
             serialize=True,
         )
         rt.audit.record("red_build", task.key, ok=build.ok, round=task.round)
@@ -242,13 +239,8 @@ async def stage_red_check(rt: Runtime, spec: TaskSpec, task: TaskState) -> State
             "## No tests selected\n\nReport the exact test commands for the new tests in `tests_selected`.",
             "red-select",
         )
-    step = await run_step(
-        f"red-test-r{task.round}",
-        commands,
-        cwd=wt.path,
-        env=env,
-        timeout_seconds=rt.cfg.test.timeout_minutes * 60,
-        log_dir=log_dir,
+    step = await stages.run_gate(
+        rt, task, wt, f"red-test-r{task.round}", commands, timeout_seconds=rt.cfg.test.timeout_minutes * 60
     )
     rt.audit.record("red_tests", task.key, failed=not step.ok, commands=commands, round=task.round)
     if cfg.require_red:
@@ -307,7 +299,7 @@ async def stage_red_check(rt: Runtime, spec: TaskSpec, task: TaskState) -> State
                 "red-pre-commit",
             )
         try:
-            sha = await rt.worktrees.commit_staged(wt, message, env=env)
+            sha = await rt.worktrees.commit_staged(wt, message, env=stages._build_env(rt, task, wt.path))
         except GitError as e:
             raise Failed(f"red commit: {e}") from e
     if sha is None:

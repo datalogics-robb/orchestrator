@@ -24,6 +24,7 @@ sequencing, isolation, credentials, validation, and the paper trail.
 | Target repos | One GitHub repo per YAML config, any language | Build and test commands must be declared in YAML; nothing language-specific is hard-coded. |
 | Work intake | CLI: issue or epic keys passed explicitly | No daemon, webhook, or polling in v1. Intake is an interface so JQL polling can be added later. |
 | Deployment | Developer workstation, foreground CLI | Single user. Credentials come from the developer's own environment. |
+| Identity | The orchestrator is run by a regular user, with that user's identity and permissions: their OS account, CLI logins, tokens, and ssh access to build machines. Revised 2026-10-08. | No service accounts, dedicated build accounts, or elevated permissions are required, and the orchestrator never creates them. It does what the user could do by hand, and nothing more. The controls in section 7 bound what agents do with those permissions; they don't swap in a different identity. Agent work is marked as such in what it writes (Jira comments, PR bodies), not by the account it comes from. |
 | Build/test knowledge | Declared in YAML per repo | Predictable and auditable; the worker never invents build commands. |
 | Review loop | 2 review rounds by default, configurable | Bounded cost. Unresolved blocking findings after the cap produce a findings report, not a PR. |
 | Jira write-back | Comment with status and PR link, transition status, attach findings when blocked | Needs a Jira token with write scope for the project. Transition names are configurable. |
@@ -667,8 +668,8 @@ process boundary rather than from Claude Code's permission prompts.
 - Only the orchestrator process talks to Jira, Confluence, and GitHub APIs. Agents get
   files, not tokens.
 - The GitHub token needs `repo` scope only; recommend a fine-grained token limited to
-  the target repository. The Jira token should belong to a dedicated automation account
-  so agent comments are visibly attributed.
+  the target repository. The Jira token is the operator's own (section 2, Identity), so
+  comments carry the operator's name, and their text says they come from an agent run.
 
 ### 7.2 Agent process environment
 
@@ -717,6 +718,11 @@ Two things cross the per-run boundary and are documented rather than hidden:
   plugins, and hooks. Shared across concurrent worktrees: session storage under
   `~/.claude/projects/`. Still per run: the MCP allowlist via `--strict-mcp-config`, tool
   denials, the PreToolUse policy hook. Providing an `ANTHROPIC_API_KEY` restores isolation.
+- **The operator's ssh access**, for remote builds (`docs/remote-builds-design.md`). The
+  orchestrator process runs `ssh` with the operator's own login, key, `known_hosts`, and ssh
+  agent, exactly as the operator would type it. Agents and build commands still get no
+  `SSH_AUTH_SOCK` and are denied `ssh`, `scp`, `rsync`, and `sftp`. They reach a build
+  machine only through the orchestrator, which allowlists and audits every command.
 - **The Conan cache** (`~/.conan2`), because agents and builds inherit `HOME`. Every
   worktree's bootstrap reads and writes one cache and reuses the developer's authenticated
   remotes; parallel bootstraps populate it concurrently under Conan 2's own locking. A
