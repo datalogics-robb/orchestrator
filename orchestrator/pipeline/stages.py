@@ -493,6 +493,7 @@ def _prompt_common(rt: Runtime, spec: TaskSpec, task: TaskState, wt: Worktree, r
         "spec_md": spec_markdown(task, with_review=False) if task.spec else "",
         "decisions": task.decisions,
         "interrupted": task.interrupted or "",
+        "platform": task.platform if task.platform and task.platform != "local" else "",
     }
 
 

@@ -13,6 +13,7 @@ Inspect `git diff origin/{{ base_branch }}` to see the current change. Context f
 The change did not pass validation. Address everything below, then rebuild and rerun the relevant tests before finishing.
 
 {{ fix_reason }}
+{% include '_platform.md' %}
 {% if spec_md %}
 ## The approved specification still governs
 

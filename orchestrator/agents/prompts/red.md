@@ -22,6 +22,7 @@ Write the tests named in the specification, and **nothing else that implements b
 5. Run your tests and confirm they **fail because the behaviour is missing**{% if require_red %} — the orchestrator will build and run them and reject this phase if they pass, do not build, or fail for a resource or setup reason instead of an assertion{% endif %}. Each test command must start with one of: {% for p in test.selection.allowed_prefixes %}`{{ p }}`{% if not loop.last %}, {% endif %}{% else %}(any){% endfor %}.
 6. Run `pre-commit run --files <your files>` if the repository has a `.pre-commit-config.yaml` and fix what it reports. Do not commit; the orchestrator commits this phase as the red commit.
 
+{% include '_platform.md' %}
 {% if shares %}
 ## Network shares
 

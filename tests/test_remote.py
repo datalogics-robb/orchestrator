@@ -306,6 +306,8 @@ async def test_a_failing_remote_build_becomes_a_fix_round_with_local_paths(
     fix_prompt = fakes.CALLS["worker"][1].prompt
     assert f"{task.worktree_path}/agent_change.txt is wrong" in fix_prompt
     assert "machine-root" not in fix_prompt
+    # both the worker and the fixer are told their gates run on the platform, not here
+    assert all("Target platform: armtest" in c.prompt for c in fakes.CALLS["worker"])
 
 
 @pytest.mark.usefixtures("fake_runners")
@@ -315,6 +317,7 @@ async def test_without_a_platform_nothing_is_contacted(config_dict: dict, tmp_pa
         rt, results, events = await _remote_run(path, ["PROJ-1"], platform=platform)
         assert results[0].state == "DONE" and results[0].node is None
         assert not any(e["event"].startswith(("node_", "pinned", "remote_")) for e in events)
+    assert not any("Target platform" in c.prompt for c in fakes.CALLS["worker"])
     assert not (tmp_path / "machine-root").exists()
 
 
