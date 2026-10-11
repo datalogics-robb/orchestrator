@@ -432,10 +432,23 @@ platform, and its setup, build, red check, and test gates run there.
   host for pinned tasks only.
 - `orchestrator nodes check | install | clean`, and the `platforms` config.
 
-It was verified against the two `linux-armv8` machines (10.200.0.78 and 10.200.0.224): `nodes
-check` and `nodes install`, plus a smoke test of prepare (including a fetch by URL), sync of a
-two-file delta, run, a timeout that killed the remote job, and clean. A full pdfl18 build there
-through the pipeline has not been run yet.
+R1's exit criterion was met on the two `linux-armv8` machines (10.200.0.78 and 10.200.0.224) on
+2026-10-11:
+
+- **Machine operations:** `nodes check`, `nodes install`, prepare (including a fetch by URL),
+  sync, run, a timeout that killed the remote job, and clean.
+- **No process survives:** a job with three child processes was stopped two ways, by cancelling
+  the task and by SIGKILLing the orchestrator's ssh with no cancel sent. On both machines nothing
+  was left running and `running_jobs` read 0.
+- **pdfl18 without an agent:** develop-21 set up and built on .224 with the configured commands,
+  a real clang-20 armv8 build (mkenv 29s, bootstrap 31s, build 199s).
+- **A Linux-only bug through a dry run:** `run --platform linux-armv8 --dry-run APDFL-6605` (a
+  rendering bug reported on Linux, fixed by a change that only affects non-Windows, non-Mac
+  builds). The worker ran on macOS. Setup, build, and the worker's new SF47475 DevTest ran on .78,
+  where the test read its input from `/raid`, and log paths came back rewritten to the worktree.
+  Two fix rounds followed, each a delta sync (3 and 2 files) and a rebuild and test run on .78;
+  every remote gate passed. The task ended blocked on the reviewer's last finding (a missing
+  16-bit test case), the pipeline's normal outcome when review rounds run out.
 
 Decisions that differ from the sections above:
 
@@ -456,6 +469,10 @@ Where the implementation goes beyond the sections above:
 - **The node script kills its job on SIGTERM, SIGHUP, and SIGINT**, as well as on stdin EOF. A
   dropped connection can arrive as either, and the orchestrator's own timeout stops the local end
   with SIGTERM.
+- **Pinned tasks' prompts name the target platform.** The worker, fixer, red, and green prompts
+  say every gate runs on the platform's machine and that not reproducing on the host is expected,
+  not a reason to block. This is the part of R2's remote-task prompts that R1 needs: without it a
+  worker on macOS blocked on a Linux-only bug because it could not verify the fix locally.
 
 Not done yet:
 
