@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Protocol
 
 from orchestrator.trackers.base import Issue, Tracker
+
+KEY_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]*-\d+$")
 
 
 @dataclass

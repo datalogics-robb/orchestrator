@@ -97,6 +97,57 @@ Each run writes to `<state_dir>/runs/<run-id>/`: per-issue prompts, agent transc
 build and test logs, the diff sent for review, the PR body, `findings.md` when blocked,
 and `audit.jsonl` recording every external side effect and every share copy.
 
+## Web monitor
+
+```bash
+bin/orchestrator serve                  # foreground; Ctrl-C or SIGTERM stops it
+bin/orchestrator serve --detach         # background, output to <state_dir>/serve.log
+bin/orchestrator serve --status         # pid and URL of the running daemon
+bin/orchestrator serve --stop
+```
+
+`serve` runs one daemon per config and serves a status page, `http://127.0.0.1:8765/` by
+default (`web.host`, `web.port`, or `--host`/`--port`). The Agents tab lists every worker and
+reviewer in recent runs, including runs started with `orchestrator run` in a terminal: which
+runtime and model, what it is doing (`work`, `fix-2`, `review-1`), its status, the task's stage,
+elapsed time, turns, and cost. It refreshes every 5 seconds.
+
+The Runs tab lists recent runs and adds work: enter issue or epic keys, pick a workflow, and
+submit. **Dry run** is checked by default; unchecking it asks for confirmation, because a real
+run pushes, opens PRs, and writes to Jira. The daemon reads the issues from Jira first (an epic
+expands to its children), so a bad key is refused on the spot, and so is a key that already has
+an unfinished task in a queued, running, or paused run. Each submission becomes one run, which
+waits as `queued` while `web.max_concurrent_runs` runs (default 1) are already going, and while
+the agents' logins fail their probe.
+
+Each run in the table has the actions that apply to it. **Cancel** stops a queued or running run
+this daemon drives: its agents are killed, its tasks stay checkpointed where they were, and the
+run is left `cancelled`. **Resume** queues an interrupted or cancelled run again from those
+checkpoints, and **Retry failed** / **Retry blocked** reopen those tasks at the stage they
+stopped in, like `resume --retry-failed` and `--retry-blocked`. Runs started with
+`orchestrator run` can't be cancelled from the page while their process is alive, but once it has
+stopped they can be resumed there. Resuming or retrying a run that isn't a dry run asks for
+confirmation.
+
+**Shut down**, in the page header, stops the daemon just as `serve --stop` or SIGTERM does,
+after a confirmation that says how many runs it will interrupt. Stopping the daemon, by any of
+these, leaves the runs it was driving `interrupted`. With `web.resume_on_start: true`
+a restarted daemon queues them again; runs you cancelled, and runs started from the CLI, are left
+alone. It is off by default, so a restart never spends money unasked.
+
+Before opening the port the daemon runs doctor's checks, including a one-line prompt through
+each role's own login, and refuses to start if anything fails (`--offline` skips the probes and
+connectivity checks). Run it as your own user in your login session, from a terminal, `--detach`,
+or a per-user LaunchAgent or `systemctl --user` unit, so agents can use your Claude subscription
+login; on macOS that login lives in your login keychain, which a system-wide service cannot
+reach.
+
+Only one operator controls the daemon. Listening on anything other than a loopback address
+requires `web.auth`, which names where the operator's token lives; browsers log in as user
+`operator` with the token as password. `web.public_read: true` lets others view without it, and
+`web.tls` serves HTTPS. The design, including the control tabs still to come, is in
+[`docs/web-monitor-design.md`](docs/web-monitor-design.md).
+
 ## Configuration
 
 One YAML file per target repository; `orchestrator init` writes a commented example.

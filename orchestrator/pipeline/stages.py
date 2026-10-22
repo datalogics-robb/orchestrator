@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import shutil
 from pathlib import Path
@@ -135,7 +136,24 @@ async def _run_agent(
         cli_login=rr.cli_login,
     )
     rt.audit.record("agent_start", task.key, role=role, runner=rr.runner.name, label=label, model=rc.model)
-    result = await rr.runner.run(request)
+    agent_id = rt.store.agent_started(rt.run_id, task.key, role, label, rr.runner.name, rc.model)
+    try:
+        result = await rr.runner.run(request)
+    except asyncio.CancelledError:
+        rt.store.agent_ended(agent_id, ok=False, termination="killed", error="cancelled")
+        raise
+    except Exception as e:
+        rt.store.agent_ended(agent_id, ok=False, termination="error", error=rt.redactor.redact(repr(e)))
+        raise
+    rt.store.agent_ended(
+        agent_id,
+        ok=result.ok,
+        termination=result.termination,
+        cost_usd=result.cost_usd,
+        turns=result.num_turns,
+        session=result.session_id,
+        error=rt.redactor.redact(result.error) if result.error else None,
+    )
     (run_dir / "result.json").write_text(
         json.dumps(rt.redactor.redact_obj(result.__dict__), indent=2, default=str)
     )

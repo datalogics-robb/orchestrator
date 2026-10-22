@@ -18,7 +18,7 @@ from orchestrator.agents.base import AgentRunner, PathGrant
 from orchestrator.agents.registry import get_runner
 from orchestrator.build.runner import BuildSemaphore
 from orchestrator.config.loader import GH_TOKEN_COMMAND, netrc_login, resolve_secret
-from orchestrator.config.schema import Config, Role
+from orchestrator.config.schema import AuthRef, Config, Role
 from orchestrator.docs.confluence import ConfluenceClient
 from orchestrator.mcp import passthrough
 from orchestrator.reporting.audit import AuditLog, Redactor
@@ -193,6 +193,38 @@ def build_runtime(
         dry_run=dry_run,
         keep_worktrees=keep_worktrees,
     )
+
+
+def redactor_for(cfg: Config) -> Redactor:
+    """A Redactor holding every secret the config resolves to, for output a run did not redact itself.
+
+    Best effort: a secret that cannot be resolved here cannot have leaked into a run either.
+    """
+    redactor = Redactor()
+    auths: list[tuple[AuthRef, list[str] | None]] = [
+        (cfg.tracker.auth, None),
+        (cfg.repo.auth, GH_TOKEN_COMMAND),
+    ]
+    if cfg.confluence:
+        auths.append((cfg.confluence.auth, None))
+    if cfg.web.auth:
+        auths.append((cfg.web.auth, None))
+    for role in ("worker", "reviewer"):
+        role_cfg = cfg.agents.role(role)  # type: ignore[arg-type]
+        if not role_cfg.auth.use_cli_login:
+            auths.append((role_cfg.auth, None))
+        try:
+            servers = passthrough.servers_for_role(cfg, role, cfg.repo.clone_path)  # type: ignore[arg-type]
+        except Exception:  # noqa: BLE001 - doctor reports unreadable MCP configs
+            continue
+        for value in passthrough.secret_values(servers):
+            redactor.add(value)
+    for auth, cli_command in auths:
+        try:
+            redactor.add(resolve_secret(auth, cli_command=cli_command))
+        except Exception:  # noqa: BLE001
+            continue
+    return redactor
 
 
 def platform_name() -> str:

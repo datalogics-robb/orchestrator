@@ -441,6 +441,66 @@ class WorkflowsConfig(StrictModel):
         return "feature" if issue_type.lower() in lowered else "bugfix"
 
 
+LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
+class WebTLS(StrictModel):
+    """Certificate and key for serving HTTPS."""
+
+    certfile: UserPath = Field(description="PEM certificate (with any intermediates) for HTTPS.")
+    keyfile: UserPath = Field(description="PEM private key for the certificate.")
+
+
+class WebConfig(StrictModel):
+    """The `orchestrator serve` daemon: a web page showing agent status, controlled by one operator."""
+
+    host: str = Field(
+        "127.0.0.1",
+        description="Address to listen on. Anything other than a loopback address requires `auth`.",
+    )
+    port: int = Field(8765, ge=1, le=65535, description="TCP port to listen on.")
+    auth: AuthRef | None = Field(
+        None,
+        description="Where the operator's token lives (token_env or netrc_machine). Browsers send it as HTTP "
+        "Basic auth with user `operator`. Required unless host is a loopback address.",
+    )
+    public_read: bool = Field(
+        False,
+        description="Let anyone who can reach the port view the pages and GET endpoints without the token. "
+        "Control always requires the operator's token.",
+    )
+    tls: WebTLS | None = Field(None, description="Serve HTTPS with this certificate; omit for plain HTTP.")
+    recent_minutes: int = Field(
+        60,
+        ge=0,
+        description="Finished and interrupted runs stay on the Agents tab this long after their last activity.",
+    )
+    max_concurrent_runs: int = Field(
+        1,
+        ge=1,
+        description="Runs the daemon drives at once. Runs submitted from the page beyond this are queued and "
+        "start in order; scheduler.max_parallel still limits the issues within each run.",
+    )
+    resume_on_start: bool = Field(
+        False,
+        description="On start, queue again every run a daemon was driving when it stopped or died. Runs the "
+        "operator cancelled, and runs started with `orchestrator run`, are left alone. Off by default, so a "
+        "restart never spends money unasked.",
+    )
+
+    @property
+    def loopback(self) -> bool:
+        return self.host in LOOPBACK_HOSTS
+
+    @model_validator(mode="after")
+    def _auth_off_loopback(self) -> WebConfig:
+        if self.auth and self.auth.use_cli_login:
+            raise ValueError("web.auth: use token_env or netrc_machine; there is no CLI login for the daemon")
+        if not self.loopback and self.auth is None:
+            raise ValueError(f"web.host {self.host} is not a loopback address, so web.auth is required")
+        return self
+
+
 class Config(StrictModel):
     """Top-level configuration: one file per target repository."""
 
@@ -463,6 +523,7 @@ class Config(StrictModel):
     workflows: WorkflowsConfig = Field(
         WorkflowsConfig(), description="Bugfix versus feature workflow routing."
     )
+    web: WebConfig = Field(WebConfig(), description="The `orchestrator serve` daemon and its web page.")
 
     @model_validator(mode="after")
     def _cross_checks(self) -> Config:

@@ -18,6 +18,8 @@ dependencies = [
     "jinja2>=3.1",
     "rich>=13.7",
     "structlog>=24.1",
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
 ]
 
 [project.optional-dependencies]
@@ -44,7 +46,7 @@ hermes = "orchestrator.agents.runners.hermes:HermesRunner"
 include = ["orchestrator*"]
 
 [tool.setuptools.package-data]
-orchestrator = ["agents/prompts/*.md", "py.typed"]
+orchestrator = ["agents/prompts/*.md", "web/static/*", "py.typed"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
