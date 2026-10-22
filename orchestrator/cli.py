@@ -124,10 +124,10 @@ repo:
 
 shares:
   support:
-    paths: {darwin: /Volumes/support, linux: /support}
+    paths: {darwin: /Volumes/support, linux: /support, windows: '\\\\server\\support'}
     expect_read_only_mount: true
   raid:
-    paths: {darwin: /Volumes/raid, linux: /raid}
+    paths: {darwin: /Volumes/raid, linux: /raid, windows: '\\\\server\\raid'}
     write_under: [agent-drops]
 
 mcp:
@@ -245,7 +245,7 @@ def init(
     if path.exists():
         err.print(f"[red]{path} already exists[/red]")
         raise typer.Exit(1)
-    path.write_text(EXAMPLE_CONFIG)
+    path.write_text(EXAMPLE_CONFIG, encoding="utf-8")
     console.print(f"Wrote {path}. Edit it, then run [bold]orchestrator doctor --config {path}[/bold].")
 
 
@@ -586,7 +586,7 @@ def resume(
             only=[k.upper() for k in only] if only else None,
             approve=approve.upper() if approve else None,
             revise=revise.upper() if revise else None,
-            decisions=decisions.read_text() if decisions else "",
+            decisions=decisions.read_text(encoding="utf-8") if decisions else "",
         )
     )
     raise typer.Exit(code)

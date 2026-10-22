@@ -58,7 +58,7 @@ async def run_conformance(
     work = tmp / "work"
     work.mkdir()
     subprocess.run(["git", "init", "-q", str(work)], check=True)
-    (work / "notes.txt").write_text("hello conformance\nsecond line\nthird line\n")
+    (work / "notes.txt").write_text("hello conformance\nsecond line\nthird line\n", encoding="utf-8")
     run_dir = tmp / "run"
     run_dir.mkdir()
     secrets: dict[str, str] = {}
@@ -98,7 +98,7 @@ async def run_conformance(
         out.get("greeting") == "hello conformance" and out.get("line_count") == 3,
         str(out.get("greeting")),
     )
-    text = (work / "notes.txt").read_text()
+    text = (work / "notes.txt").read_text(encoding="utf-8")
     report.add(
         "edited the file",
         "conformance: edited" in text,

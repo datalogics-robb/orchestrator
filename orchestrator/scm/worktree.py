@@ -79,9 +79,9 @@ class WorktreeManager:
         )
         exclude = common / "info" / "exclude"
         exclude.parent.mkdir(parents=True, exist_ok=True)
-        existing_lines = exclude.read_text().splitlines() if exclude.exists() else []
+        existing_lines = exclude.read_text(encoding="utf-8").splitlines() if exclude.exists() else []
         if ".orchestrator/" not in existing_lines:
-            with exclude.open("a") as f:
+            with exclude.open("a", encoding="utf-8") as f:
                 f.write("\n.orchestrator/\n")
         base_sha = (await git("rev-parse", "HEAD", cwd=path)).out.strip()
         return Worktree(

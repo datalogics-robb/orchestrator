@@ -39,11 +39,11 @@ def _write_spec_context(rt: Runtime, task: TaskState) -> None:
     wt = stages._worktree(rt, task)
     ctx = stages._context_dir(wt)
     md = spec_markdown(task)
-    (ctx / "spec.md").write_text(md)
-    (rt.task_dir(task.key) / "spec.md").write_text(md)
+    (ctx / "spec.md").write_text(md, encoding="utf-8")
+    (rt.task_dir(task.key) / "spec.md").write_text(md, encoding="utf-8")
     if task.decisions:
         (ctx / "decisions.md").write_text(
-            f"# Approver's decisions for {task.key}\n\n{task.decisions.strip()}\n"
+            f"# Approver's decisions for {task.key}\n\n{task.decisions.strip()}\n", encoding="utf-8"
         )
 
 
@@ -317,7 +317,7 @@ async def stage_red_check(rt: Runtime, spec: TaskSpec, task: TaskState) -> State
     rt.audit.record("red_commit", task.key, sha=sha, tests=commands, round=task.round)
     if cfg.pause_after_red:
         red_md = red_markdown(task)
-        (rt.task_dir(task.key) / "red.md").write_text(red_md)
+        (rt.task_dir(task.key) / "red.md").write_text(red_md, encoding="utf-8")
         comment = (
             f"Agent run {rt.run_id} committed the failing tests for {task.key} ({sha[:10]}); see the attached "
             f"red.md. Approve them with `orchestrator resume {rt.run_id} --approve {task.key}` to start the "

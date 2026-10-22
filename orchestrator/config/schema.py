@@ -21,7 +21,7 @@ from pydantic import (
     model_validator,
 )
 
-Platform = Literal["darwin", "linux"]
+Platform = Literal["darwin", "linux", "windows"]
 Role = Literal["worker", "reviewer"]
 WorktreeAccess = Literal["read-only", "workspace-write"]
 ShareMode = Literal["read", "read-write"]
@@ -185,7 +185,10 @@ class ShareConfig(StrictModel):
     """A network share agents may read from or write to."""
 
     paths: dict[Platform, UserPath] = Field(
-        description="Mount path per platform, e.g. {darwin: /Volumes/support, linux: /support}."
+        description=(
+            "Mount path per platform, e.g. {darwin: /Volumes/support, linux: /support, "
+            "windows: '\\\\server\\support'}. Windows takes a UNC path or a mapped drive."
+        )
     )
     expect_read_only_mount: bool = Field(
         False, description="doctor warns when this share is mounted writable."
@@ -196,14 +199,19 @@ class ShareConfig(StrictModel):
     )
 
     def path_for(self, platform: str = sys.platform) -> Path | None:
-        key: Platform | None
-        if platform == "darwin":
-            key = "darwin"
-        elif platform.startswith("linux"):
-            key = "linux"
-        else:
-            key = None
+        key = platform_key(platform)
         return self.paths.get(key) if key else None
+
+
+def platform_key(platform: str = sys.platform) -> Platform | None:
+    """The `shares.*.paths` key for a `sys.platform` value."""
+    if platform == "darwin":
+        return "darwin"
+    if platform.startswith("linux"):
+        return "linux"
+    if platform == "win32":
+        return "windows"
+    return None
 
 
 def _normalize_deny(value: Any) -> dict[str, list[str]]:

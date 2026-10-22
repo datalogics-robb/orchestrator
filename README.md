@@ -11,6 +11,7 @@ and daily use.
 
 ## Requirements
 
+- macOS, Linux, or Windows 10/11 (see [Windows](#windows)).
 - Python 3.13 or newer, `git`, and the `gh` CLI (authenticated or with a token).
 - The agent CLIs you configure: `claude` for Claude Code, `codex` for Codex, and
   optionally `gemini`, `opencode`, `hermes`.
@@ -35,12 +36,57 @@ it. Activate the environment instead if you prefer:
 python -m orchestrator --help
 ```
 
+On Windows, run `bin\orchestrator` (`bin/orchestrator.cmd`) from PowerShell or cmd; the
+environment's programs are in `python-env-<hostname>\Scripts`.
+
 `doctor` exits non-zero while anything is wrong. It also lists, per role, which limits the
 chosen runtime enforces natively and which the orchestrator enforces softly.
 
 Unless `--offline` is given, it sends one throwaway prompt through each role's own login and
 model. A credential or model name is only settled by the service, and the reviewer runs last,
 so without that probe a bad one surfaces after a worker, a build and a test suite are paid for.
+
+## Windows
+
+The orchestrator runs natively on Windows; under WSL it is simply the Linux build. Natively,
+these things differ:
+
+- **Git for Windows is required**, not just a `git.exe`: Claude Code runs its Bash tool in Git
+  Bash (set `CLAUDE_CODE_GIT_BASH_PATH` if `bash` is not on PATH), and `git push` runs the
+  orchestrator's one-off credential helper with Git's `sh`.
+- **Launcher:** `bin\orchestrator` runs the venv's Python in UTF-8 mode. Without it Python
+  3.13 reads and writes files in the Windows code page; the package names UTF-8 for its own
+  files, but third-party output would not.
+- **Credentials:** `netrc_machine` reads `%USERPROFILE%\.netrc`, or `%USERPROFILE%\_netrc`
+  when there is no `.netrc`, as curl and git do.
+- **Shares** take a `windows:` path, a UNC path or a mapped drive:
+  `paths: {darwin: /Volumes/raid, linux: /raid, windows: '\\server\raid'}`. Mapped drives
+  belong to a logon session, so a daemon started outside your session sees only UNC paths.
+- **Programs are looked up on the agent's or build's own PATH**, as on POSIX, with `PATHEXT`.
+  Agent CLIs installed with npm are `.cmd` shims; the orchestrator runs the shim's node script
+  directly, because cmd.exe would re-parse the arguments (Claude Code's JSON schema among them).
+  Any other `.bat` or `.cmd` program, in `build:` or `test:` for example, runs only when none of
+  its arguments contains `" % ! ^ & | < > ( )` or a newline.
+- **Build and test commands run without a shell**, as everywhere, so they must be Windows
+  programs: `python -m pytest`, not `./run-tests.sh`. A repository whose commands differ by
+  platform needs a separate config for Windows. Windows venvs have no `python3.exe`.
+- **Stopping agents:** a timeout or cancel kills the agent's whole process tree with
+  `taskkill /T /F`; there is no SIGTERM-first grace period.
+- **Command-line length:** Windows caps a command line at 32,767 characters. OpenCode and Hermes
+  take the prompt as an argument, so a long prompt fails there; Claude Code, Codex, and Gemini
+  CLI read it from stdin.
+- **Codex's sandbox** on Windows is not the Seatbelt (macOS) or Landlock (Linux) sandbox that
+  keeps the reviewer read-only elsewhere, and `doctor` warns about it. Confirm that your Codex
+  version enforces `--sandbox read-only` before relying on it.
+- **The daemon:** `serve --detach` starts it with its own hidden console, so it survives the
+  terminal and the agents it starts open no windows. `serve --stop` creates
+  `<state_dir>\serve.stop`, which the daemon polls for, since Windows has no SIGTERM; Ctrl-C and
+  Ctrl-Break stop a foreground daemon. To start it at logon, use a Task Scheduler task that runs
+  as you, only when you are logged on.
+
+The test suite drives fake agents through POSIX shell scripts, so it runs on macOS and Linux;
+`tests/test_windows.py` covers the Windows-only logic there. On Windows, prove each adapter with
+`orchestrator conformance <runner>` instead.
 
 ## Running
 
@@ -100,7 +146,7 @@ and `audit.jsonl` recording every external side effect and every share copy.
 ## Web monitor
 
 ```bash
-bin/orchestrator serve                  # foreground; Ctrl-C or SIGTERM stops it
+bin/orchestrator serve                  # foreground; Ctrl-C or SIGTERM stops it (Windows: --stop)
 bin/orchestrator serve --detach         # background, output to <state_dir>/serve.log
 bin/orchestrator serve --status         # pid and URL of the running daemon
 bin/orchestrator serve --stop
@@ -214,6 +260,7 @@ the isolation elsewhere.
 python-env-*/bin/pytest                 # unit tests plus dry-run pipeline tests with fake agents
 python-env-*/bin/ruff format . && python-env-*/bin/ruff check .
 python-env-*/bin/mypy orchestrator
+python-env-*/bin/mypy --platform win32 orchestrator   # the Windows branches, checked from anywhere
 ```
 
 The pipeline tests build a temporary git repository and drive the whole state machine with

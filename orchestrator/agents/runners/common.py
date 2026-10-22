@@ -49,7 +49,9 @@ def version_of(binary: str, args: list[str] | None = None) -> str | None:
     if not path:
         return None
     try:
-        out = subprocess.run([path] + (args or ["--version"]), capture_output=True, text=True, timeout=20)
+        out = subprocess.run(
+            [path] + (args or ["--version"]), capture_output=True, text=True, timeout=20, encoding="utf-8"
+        )
     except (OSError, subprocess.TimeoutExpired):
         return None
     text = (out.stdout or out.stderr).strip()

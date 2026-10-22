@@ -6,6 +6,7 @@ import netrc
 import os
 import re
 import subprocess
+import sys
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -58,7 +59,7 @@ def scan_for_secrets(raw: Any) -> list[str]:
 
 def load_raw(path: Path) -> dict[str, Any]:
     try:
-        with path.open() as f:
+        with path.open(encoding="utf-8") as f:
             raw = yaml.safe_load(f)
     except FileNotFoundError as e:
         raise ConfigError(f"config file not found: {path}") from e
@@ -103,7 +104,13 @@ def resolve_secret(
         cli_env = {k: v for k, v in source.items() if k not in CLI_LOGIN_UNSET}
         try:
             out = subprocess.run(
-                cli_command, capture_output=True, text=True, timeout=30, check=True, env=cli_env
+                cli_command,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=True,
+                env=cli_env,
+                encoding="utf-8",
             )
         except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
             raise SecretError(f"{' '.join(cli_command)} failed: {e}") from e
@@ -118,7 +125,7 @@ def resolve_secret(
         return value
     assert ref.netrc_machine
     try:
-        auth = netrc.netrc().authenticators(ref.netrc_machine)
+        auth = _netrc().authenticators(ref.netrc_machine)
     except FileNotFoundError as e:
         raise SecretError("no ~/.netrc file") from e
     except netrc.NetrcParseError as e:
@@ -128,10 +135,23 @@ def resolve_secret(
     return auth[2]
 
 
+def _netrc() -> netrc.netrc:
+    """~/.netrc; on Windows ~/_netrc when there is no ~/.netrc, as curl and git read it there.
+
+    Only the Windows fallback names the file explicitly: on POSIX, netrc checks the default
+    file's permissions only when it chose the file itself.
+    """
+    if sys.platform == "win32":
+        home = Path.home()
+        if not (home / ".netrc").exists() and (home / "_netrc").exists():
+            return netrc.netrc(str(home / "_netrc"))
+    return netrc.netrc()
+
+
 def netrc_login(machine: str) -> str | None:
     """The login name paired with a netrc machine, if any (Jira basic auth needs it)."""
     try:
-        auth = netrc.netrc().authenticators(machine)
+        auth = _netrc().authenticators(machine)
     except (FileNotFoundError, netrc.NetrcParseError):
         return None
     return auth[0] if auth else None

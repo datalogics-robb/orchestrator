@@ -64,14 +64,14 @@ class GeminiCliRunner:
             "mcpServers": request.mcp_servers,
             "model": {"maxSessionTurns": request.limits.max_turns or -1},
         }
-        (settings_dir / "settings.json").write_text(json.dumps(settings, indent=2))
+        (settings_dir / "settings.json").write_text(json.dumps(settings, indent=2), encoding="utf-8")
         env = dict(request.env)
         env["GEMINI_CLI_HOME"] = str(home)
         prompt = request.prompt + schema_instructions(request.schema)
         if request.system_prompt:
             prompt = request.system_prompt + "\n\n" + prompt
         argv = self.argv(request)
-        (request.run_dir / "argv.json").write_text(json.dumps(argv, indent=2))
+        (request.run_dir / "argv.json").write_text(json.dumps(argv, indent=2), encoding="utf-8")
         outcome = await run_process(
             argv,
             cwd=request.cwd,

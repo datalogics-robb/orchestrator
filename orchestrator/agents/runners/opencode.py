@@ -82,7 +82,7 @@ class OpenCodeRunner:
 
     async def run(self, request: AgentRequest) -> AgentResult:
         home = common.config_home(request, "opencode-config")
-        (home / "opencode.json").write_text(json.dumps(self._config(request), indent=2))
+        (home / "opencode.json").write_text(json.dumps(self._config(request), indent=2), encoding="utf-8")
         env = dict(request.env)
         env["OPENCODE_CONFIG_DIR"] = str(home)
         env["OPENCODE_CONFIG"] = str(home / "opencode.json")
@@ -91,7 +91,9 @@ class OpenCodeRunner:
         if request.system_prompt:
             prompt = request.system_prompt + "\n\n" + prompt
         argv = self.argv(request, prompt)
-        (request.run_dir / "argv.json").write_text(json.dumps(argv[:-1] + ["<prompt>"], indent=2))
+        (request.run_dir / "argv.json").write_text(
+            json.dumps(argv[:-1] + ["<prompt>"], indent=2), encoding="utf-8"
+        )
         outcome = await run_process(
             argv,
             cwd=request.cwd,

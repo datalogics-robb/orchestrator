@@ -129,11 +129,11 @@ class ConfluenceClient:
         if cache_dir:
             cached = cache_dir / f"confluence-{page_id}-v{version}.md"
             if cached.exists():
-                return title, cached.read_text()
+                return title, cached.read_text(encoding="utf-8")
         md = storage_to_markdown(((data.get("body") or {}).get("storage") or {}).get("value", ""))
         if cache_dir:
             cache_dir.mkdir(parents=True, exist_ok=True)
-            (cache_dir / f"confluence-{page_id}-v{version}.md").write_text(md)
+            (cache_dir / f"confluence-{page_id}-v{version}.md").write_text(md, encoding="utf-8")
         return title, md
 
     async def publish(self, title: str, markdown: str) -> str:

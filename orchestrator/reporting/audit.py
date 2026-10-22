@@ -51,5 +51,5 @@ class AuditLog:
             **self.redactor.redact_obj(payload),
         }
         line = json.dumps(entry, default=str)
-        with self._lock, self.path.open("a") as f:
+        with self._lock, self.path.open("a", encoding="utf-8") as f:
             f.write(line + "\n")

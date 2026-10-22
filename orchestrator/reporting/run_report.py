@@ -32,6 +32,8 @@ def run_report_markdown(run_id: str, tasks: list[TaskState], dry_run: bool) -> s
 
 def write_run_report(run_dir: Path, run_id: str, tasks: list[TaskState], dry_run: bool) -> Path:
     md = run_report_markdown(run_id, tasks, dry_run)
-    (run_dir / "report.md").write_text(md)
-    (run_dir / "report.json").write_text(json.dumps([t.to_json() for t in tasks], indent=2, default=str))
+    (run_dir / "report.md").write_text(md, encoding="utf-8")
+    (run_dir / "report.json").write_text(
+        json.dumps([t.to_json() for t in tasks], indent=2, default=str), encoding="utf-8"
+    )
     return run_dir / "report.md"

@@ -34,7 +34,7 @@ def load_grants() -> list[dict]:
     path = os.environ.get(GRANTS_ENV)
     if not path:
         raise CopyError(f"{GRANTS_ENV} is not set; orchestrator-cp only works inside an orchestrator run")
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         return json.load(f)
 
 
@@ -46,7 +46,7 @@ def parse_ref(ref: str, grants: list[dict]) -> tuple[dict, Path]:
     if grant is None:
         raise CopyError(f"share '{share}' is not granted to this task")
     root = Path(grant["path"]).resolve()
-    target = (root / rel.lstrip("/")).resolve()
+    target = (root / rel.lstrip("/\\")).resolve()
     if target != root and root not in target.parents:
         raise CopyError(f"'{ref}' escapes share '{share}'")
     return grant, target
@@ -125,7 +125,7 @@ def audit(entries: list[dict]) -> None:
     path = os.environ.get(AUDIT_ENV)
     if not path:
         return
-    with open(path, "a") as f:
+    with open(path, "a", encoding="utf-8") as f:
         for e in entries:
             f.write(json.dumps(e) + "\n")
 

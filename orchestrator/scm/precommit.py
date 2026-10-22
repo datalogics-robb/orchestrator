@@ -66,17 +66,17 @@ async def run_on_files(
     first = await run_process(argv, cwd=worktree, env=env, timeout=1800)
     output = first.stdout + first.stderr
     if first.timed_out:
-        log_path.write_text(output)
+        log_path.write_text(output, encoding="utf-8")
         return PreCommitResult(False, output="pre-commit timed out after 30 minutes\n" + tail(output))
     if first.exit_code == 0:
-        log_path.write_text(output)
+        log_path.write_text(output, encoding="utf-8")
         return PreCommitResult(True, tail(output))
     autofixed = MODIFIED_MARKER in output
     if not autofixed:
-        log_path.write_text(output)
+        log_path.write_text(output, encoding="utf-8")
         return PreCommitResult(False, tail(output, 80))
     second = await run_process(argv, cwd=worktree, env=env, timeout=1800)
     output2 = second.stdout + second.stderr
-    log_path.write_text(output + "\n--- second pass after auto-fixes ---\n" + output2)
+    log_path.write_text(output + "\n--- second pass after auto-fixes ---\n" + output2, encoding="utf-8")
     ok = second.exit_code == 0 and not second.timed_out
     return PreCommitResult(ok, tail(output2, 80), autofixed=True)

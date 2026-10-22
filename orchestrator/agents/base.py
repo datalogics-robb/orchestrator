@@ -4,13 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import re
-import signal
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Protocol, runtime_checkable
 
+from orchestrator import oscompat
 from orchestrator.config.schema import Role, RoleConfig, ShareMode, WorktreeAccess
 
 Termination = Literal["completed", "max_turns", "max_budget", "timeout", "schema", "error", "killed"]
@@ -146,15 +145,18 @@ async def run_process(
     stdout_path: Path | None = None,
     stderr_path: Path | None = None,
 ) -> ProcessOutcome:
-    """Run a command in its own process group; kill the whole group on timeout."""
+    """Run a command in its own process group; kill the whole group on timeout.
+
+    The program is looked up on `env`'s PATH on every platform (see `oscompat.resolve_argv`).
+    """
     proc = await asyncio.create_subprocess_exec(
-        *argv,
+        *oscompat.resolve_argv(argv, path=env.get("PATH"), cwd=cwd),
         cwd=str(cwd),
         env=env,
         stdin=asyncio.subprocess.PIPE if stdin_text is not None else asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
-        start_new_session=True,
+        **oscompat.process_group_kwargs(),
     )
     timed_out = False
     try:
@@ -172,34 +174,25 @@ async def run_process(
     stdout = out_b.decode(errors="replace")
     stderr = err_b.decode(errors="replace")
     if stdout_path:
-        stdout_path.write_text(stdout)
+        stdout_path.write_text(stdout, encoding="utf-8")
     if stderr_path:
-        stderr_path.write_text(stderr)
+        stderr_path.write_text(stderr, encoding="utf-8")
     return ProcessOutcome(proc.returncode, stdout, stderr, timed_out)
 
 
 async def _terminate(proc: asyncio.subprocess.Process) -> tuple[bytes, bytes]:
-    """SIGTERM the process group, escalate to SIGKILL, and reap; returns whatever output remains."""
-    _kill_group(proc.pid, signal.SIGTERM)
+    """Ask the process group to stop, escalate to a forced kill, and reap; returns whatever output remains."""
+    oscompat.kill_tree(proc.pid, force=False)
     try:
         return await asyncio.shield(asyncio.wait_for(proc.communicate(), timeout=10))
     except (TimeoutError, asyncio.CancelledError):
         pass
-    _kill_group(proc.pid, signal.SIGKILL)
+    oscompat.kill_tree(proc.pid, force=True)
     try:
         await asyncio.shield(asyncio.wait_for(proc.wait(), timeout=5))
     except (TimeoutError, asyncio.CancelledError):
         pass
     return b"", b""
-
-
-def _kill_group(pid: int, sig: int) -> None:
-    try:
-        os.killpg(os.getpgid(pid), sig)
-    except ProcessLookupError:
-        return
-    except PermissionError:
-        return
 
 
 _FENCE = re.compile(r"```(?:json)?\s*\n(.*?)\n```", re.DOTALL)

@@ -3,13 +3,16 @@
 The daemon holds an exclusive lock on `<state_dir>/serve.pid` for its whole life, so a second
 daemon on the same state directory refuses to start. The pidfile holds JSON naming the pid, host,
 port, and URL; `ready` turns true once the port is listening, which is what `--detach` waits for.
+
+`--stop` sends SIGTERM on POSIX. Windows has no signal one process can send another to ask it to
+exit, so there `--stop` creates `<state_dir>/serve.stop`, which the daemon polls for on every
+platform.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
-import fcntl
 import json
 import os
 import signal
@@ -24,7 +27,7 @@ from pathlib import Path
 
 import uvicorn
 
-from orchestrator import __version__
+from orchestrator import __version__, oscompat
 from orchestrator.build.runner import BuildSemaphore
 from orchestrator.config.loader import resolve_secret
 from orchestrator.config.schema import Config, WebConfig
@@ -37,6 +40,7 @@ from orchestrator.web.runs import RunManager
 from orchestrator.web.status import DaemonInfo
 
 PIDFILE = "serve.pid"
+STOPFILE = "serve.stop"
 LOGFILE = "serve.log"
 READY_TIMEOUT = 600.0
 """How long `--detach` waits for the port; startup runs doctor's live probes, which can take minutes."""
@@ -53,7 +57,7 @@ class DaemonRecord:
 
 
 class PidLock:
-    """An exclusive, non-blocking flock on the pidfile, held until release or process exit."""
+    """An exclusive, non-blocking lock on the pidfile, held until release or process exit."""
 
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -61,10 +65,8 @@ class PidLock:
 
     def acquire(self) -> bool:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o644)
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
+        fd = os.open(self.path, os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0), 0o644)
+        if not oscompat.try_lock(fd):
             os.close(fd)
             return False
         self._fd = fd
@@ -73,18 +75,22 @@ class PidLock:
     def write(self, record: DaemonRecord) -> None:
         assert self._fd is not None
         data = json.dumps(asdict(record)).encode()
-        os.ftruncate(self._fd, 0)
-        os.pwrite(self._fd, data, 0)
+        oscompat.replace_contents(self._fd, data)
 
     def release(self) -> None:
         if self._fd is not None:
             os.ftruncate(self._fd, 0)
+            oscompat.unlock(self._fd)
             os.close(self._fd)
             self._fd = None
 
 
 def pidfile(cfg: Config) -> Path:
     return cfg.resolved_state_dir / PIDFILE
+
+
+def stopfile(cfg: Config) -> Path:
+    return cfg.resolved_state_dir / STOPFILE
 
 
 def logfile(cfg: Config) -> Path:
@@ -101,7 +107,7 @@ def read_record(cfg: Config) -> DaemonRecord | None:
         probe.release()
         return None
     try:
-        return DaemonRecord(**json.loads(path.read_text()))
+        return DaemonRecord(**json.loads(path.read_text(encoding="utf-8")))
     except (ValueError, TypeError):
         return DaemonRecord(pid=0, host="", port=0, url="", ready=False)  # starting; not written yet
 
@@ -131,7 +137,10 @@ class _Server(uvicorn.Server):
         if threading.current_thread() is not threading.main_thread():
             yield
             return
-        original = {sig: signal.signal(sig, self.handle_exit) for sig in (signal.SIGINT, signal.SIGTERM)}
+        signals = [signal.SIGINT, signal.SIGTERM]
+        if sys.platform == "win32":
+            signals.append(signal.SIGBREAK)  # Ctrl+Break in the daemon's console
+        original = {sig: signal.signal(sig, self.handle_exit) for sig in signals}
         try:
             yield
         finally:
@@ -182,6 +191,7 @@ async def serve(
         where = f" (pid {running.pid}, {running.url})" if running and running.pid else ""
         say(f"a daemon is already serving {cfg.resolved_state_dir}{where}")
         return 1
+    stopfile(cfg).unlink(missing_ok=True)  # left by a --stop that found the daemon already gone
     try:
         health = Health()
         if checks:
@@ -241,6 +251,7 @@ async def serve(
             for run_id in await runs.resume_interrupted():
                 say(f"resuming run {run_id}")
         task = asyncio.create_task(server.serve())
+        watcher = asyncio.create_task(watch_stopfile(stopfile(cfg), server))
         while not server.started and not task.done():
             await asyncio.sleep(0.05)
         if server.started:
@@ -255,11 +266,22 @@ async def serve(
         try:
             await task
         finally:
+            watcher.cancel()
             await runs.shutdown(client=stopped_by[0] if stopped_by else None)
         store.close()
         return 0 if server.started else 1
     finally:
         lock.release()
+
+
+async def watch_stopfile(path: Path, server: _Server) -> None:
+    """Shut down, as SIGTERM would, when `path` appears: how `--stop` reaches the daemon on Windows."""
+    while not server.should_exit:
+        if path.exists():
+            path.unlink(missing_ok=True)
+            server.should_exit = True
+            return
+        await asyncio.sleep(0.5)
 
 
 def detach(cfg: Config, argv: list[str], say: Callable[[str], None] = print) -> int:
@@ -269,19 +291,20 @@ def detach(cfg: Config, argv: list[str], say: Callable[[str], None] = print) -> 
     env = dict(os.environ)
     root = str(Path(__file__).resolve().parents[2])
     env["PYTHONPATH"] = root + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
-    with log_path.open("a") as log:
+    env["PYTHONUTF8"] = "1"  # serve.log is UTF-8 on every platform, not the Windows code page
+    with log_path.open("a", encoding="utf-8") as log:
         proc = subprocess.Popen(
             [sys.executable, "-m", "orchestrator", *argv],
             stdin=subprocess.DEVNULL,
             stdout=log,
             stderr=subprocess.STDOUT,
             env=env,
-            start_new_session=True,
+            **oscompat.detached_kwargs(),
         )
     deadline = time.monotonic() + READY_TIMEOUT
     while time.monotonic() < deadline:
         if proc.poll() is not None:
-            tail = log_path.read_text().splitlines()[-15:]
+            tail = log_path.read_text(encoding="utf-8").splitlines()[-15:]
             say("the daemon exited during startup:\n" + "\n".join(tail))
             return 1
         record = read_record(cfg)
@@ -298,7 +321,10 @@ def stop(cfg: Config, say: Callable[[str], None] = print) -> int:
     if record is None or not record.pid:
         say(f"no daemon is serving {cfg.resolved_state_dir}")
         return 1
-    os.kill(record.pid, signal.SIGTERM)
+    if sys.platform == "win32":
+        stopfile(cfg).touch()
+    else:
+        os.kill(record.pid, signal.SIGTERM)
     deadline = time.monotonic() + STOP_TIMEOUT
     while time.monotonic() < deadline:
         if read_record(cfg) is None:
