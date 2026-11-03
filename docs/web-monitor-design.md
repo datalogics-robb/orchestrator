@@ -50,14 +50,20 @@ orchestrator serve --config orchestrator.yaml [--host H] [--port P] [--detach]
  └── heartbeat ──────────── every 15 s: UPDATE runs SET heartbeat=now WHERE owner = this daemon
 ```
 
-- **Single instance.** On start, `serve` takes an exclusive `flock` on `<state_dir>/serve.pid`
+- **Single instance.** On start, `serve` takes an exclusive lock on `<state_dir>/serve.pid`
+  (`flock` on POSIX; on Windows `msvcrt.locking` on one byte far past the data, since a locked
+  Windows byte range can't be read)
   and writes its pid, host, and port there. A second `serve` on the same state directory
   exits with an error naming the running one.
 - **Detach.** `--detach` re-executes itself as
-  `sys.executable -m orchestrator serve ...` with `start_new_session=True` and output going to
+  `sys.executable -m orchestrator serve ...` with `start_new_session=True` (Windows:
+  `CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP`, a hidden console its agents inherit) and output going to
   `<state_dir>/serve.log`. It waits until `GET /api/health` answers, prints the URL, and
   exits. This avoids `fork()` after imports, which is unreliable on macOS.
-  `orchestrator serve --stop` sends SIGTERM to the pid in the pidfile.
+  `orchestrator serve --stop` sends SIGTERM to the pid in the pidfile. Windows has no signal
+  one process can send another to ask it to exit, so there `--stop` creates
+  `<state_dir>/serve.stop`; the daemon polls for it every half second on every platform and
+  shuts down as for SIGTERM. A stopfile left from before startup is deleted, not obeyed.
   `orchestrator serve --status` prints the pid and URL.
 - **Shutdown.** SIGTERM or SIGINT stops accepting HTTP requests, cancels the run tasks
   (`run_process` already kills each agent's process group on `CancelledError`), marks those

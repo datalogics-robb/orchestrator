@@ -14,6 +14,7 @@ activating.
 python-env-*/bin/pytest                          # ~10s, fake agents, no tokens spent
 python-env-*/bin/ruff format . && python-env-*/bin/ruff check .
 python-env-*/bin/mypy orchestrator
+python-env-*/bin/mypy --platform win32 orchestrator   # Windows branches; also darwin when touching them
 bin/orchestrator --help                          # runs the package from the venv
 ```
 
@@ -62,6 +63,9 @@ tokens. `orchestrator.yaml` at the repo root is the user's local, gitignored con
   response). `status.py` derives the Agents tab rows from the store as pure functions.
   `static/` holds the page: plain HTML, CSS, and JS with no build step and no CDN.
   `docs/web-monitor-design.md` is the design and milestone plan.
+- `oscompat.py` – everything that differs on Windows: finding a program on the child's PATH
+  (and unwrapping npm `.cmd` shims), process groups and tree kill, the pidfile lock. Branch
+  on `sys.platform == "win32"` directly so mypy's `--platform` checks each side.
 - `scm/` (git, worktrees, GitHub via `gh`, pre-commit gate), `trackers/` (Jira, ADF
   conversion), `docs/confluence.py`, `mcp/passthrough.py` (reads each CLI's own MCP config and
   forwards only allowlisted servers), `shares/` (grants plus the `orchestrator-cp` entry point),
@@ -78,6 +82,10 @@ tokens. `orchestrator.yaml` at the repo root is the user's local, gitignored con
   describe it.
 - **Dependencies:** add them to both `requirements.in` (what mkenv installs) and
   `pyproject.toml`.
+- **Portability:** the package runs on macOS, Linux, and native Windows. Name
+  `encoding="utf-8"` on every text read, write, and `open` (`tests/test_windows.py` checks);
+  run agent and build commands through `run_process`, and use `oscompat` rather than
+  `start_new_session`, `fcntl`, or signals; build paths with `pathlib`, not `/`-joined strings.
 - **Secrets:** never in YAML, logs, or prompts. Secrets go through `Redactor` and the audit
   log; agent processes get the env from `environment.build_env`, not `os.environ`.
 - **Side effects:** every external side effect (Jira, GitHub, Confluence, share copy) is

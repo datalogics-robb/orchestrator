@@ -709,6 +709,36 @@ async def test_daemon_serves_runs_locks_and_stops(
 
 
 @pytest.mark.usefixtures("fake_runners")
+async def test_daemon_stops_when_the_stopfile_appears(
+    config_dict: dict, config_path: Path, tmp_path: Path
+) -> None:
+    """`--stop` on Windows: a stopfile the daemon polls for. One left from before startup is ignored."""
+    cfg = _config(config_dict)
+    daemon.stopfile(cfg).parent.mkdir(parents=True, exist_ok=True)
+    daemon.stopfile(cfg).touch()
+    web = daemon.effective_web(cfg, None, _free_port())
+    ready: list = []
+    said: list[str] = []
+    serving = asyncio.create_task(
+        daemon.serve(
+            cfg, config_path, tmp_path, web=web, checks=False, say=said.append, on_ready=ready.append
+        )
+    )
+    for _ in range(200):
+        if ready or serving.done():
+            break
+        await asyncio.sleep(0.05)
+    assert ready, said
+    await asyncio.sleep(1.0)  # longer than one poll: the stale stopfile must not stop it
+    assert not serving.done()
+
+    daemon.stopfile(cfg).touch()
+    assert await asyncio.wait_for(serving, 30) == 0
+    assert not daemon.stopfile(cfg).exists()
+    assert daemon.read_record(cfg) is None
+
+
+@pytest.mark.usefixtures("fake_runners")
 async def test_shutdown_from_the_page_interrupts_runs_and_stops_the_daemon(
     config_dict: dict, config_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

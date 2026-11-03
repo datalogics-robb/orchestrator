@@ -84,14 +84,18 @@ class HermesRunner:
 
     async def run(self, request: AgentRequest) -> AgentResult:
         home = common.config_home(request, "hermes-home")
-        (home / "config.yaml").write_text(yaml.safe_dump(self._config(request), sort_keys=False))
+        (home / "config.yaml").write_text(
+            yaml.safe_dump(self._config(request), sort_keys=False), encoding="utf-8"
+        )
         env = dict(request.env)
         env["HERMES_HOME"] = str(home)
         prompt = request.prompt + schema_instructions(request.schema)
         if request.system_prompt:
             prompt = request.system_prompt + "\n\n" + prompt
         argv = self.argv(request, prompt)
-        (request.run_dir / "argv.json").write_text(json.dumps(argv[:2] + ["<prompt>"] + argv[3:], indent=2))
+        (request.run_dir / "argv.json").write_text(
+            json.dumps(argv[:2] + ["<prompt>"] + argv[3:], indent=2), encoding="utf-8"
+        )
         outcome = await run_process(
             argv,
             cwd=request.cwd,
@@ -106,7 +110,7 @@ class HermesRunner:
         usage_path = request.run_dir / "usage.json"
         if usage_path.exists():
             try:
-                usage = json.loads(usage_path.read_text())
+                usage = json.loads(usage_path.read_text(encoding="utf-8"))
             except json.JSONDecodeError:
                 usage = {}
         structured = extract_json(outcome.stdout)

@@ -43,7 +43,7 @@ class StepResult:
         parts = []
         for r in self.results:
             if not r.ok:
-                text = r.log_path.read_text(errors="replace") if r.log_path.exists() else ""
+                text = r.log_path.read_text(encoding="utf-8", errors="replace") if r.log_path.exists() else ""
                 parts.append(f"$ {' '.join(r.argv)}\n" + "\n".join(text.splitlines()[-lines:]))
         return "\n\n".join(parts)
 
@@ -100,7 +100,8 @@ async def run_step(
         else:
             outcome = await run_process(argv, cwd=cwd, env=current_env, timeout=timeout_seconds)
         log_path.write_text(
-            outcome.stdout + ("\n--- stderr ---\n" + outcome.stderr if outcome.stderr else "")
+            outcome.stdout + ("\n--- stderr ---\n" + outcome.stderr if outcome.stderr else ""),
+            encoding="utf-8",
         )
         step.results.append(CommandResult(argv, outcome.exit_code, outcome.timed_out, log_path))
         if not step.results[-1].ok:

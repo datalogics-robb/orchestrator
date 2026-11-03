@@ -8,13 +8,48 @@ from collections.abc import Mapping
 from pathlib import Path
 
 _KEEP = ("HOME", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "TMPDIR", "SHELL", "USER", "LOGNAME")
+# Windows equivalents of the above: the profile and temp directories, and the system variables
+# without which Windows programs fail (SYSTEMROOT for sockets and crypto, COMSPEC and PATHEXT
+# for finding programs). Claude Code needs CLAUDE_CODE_GIT_BASH_PATH when Git Bash is not on PATH.
+_KEEP_WINDOWS = (
+    "SYSTEMROOT",
+    "SYSTEMDRIVE",
+    "WINDIR",
+    "COMSPEC",
+    "PATHEXT",
+    "OS",
+    "PROCESSOR_ARCHITECTURE",
+    "NUMBER_OF_PROCESSORS",
+    "TEMP",
+    "TMP",
+    "USERPROFILE",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "PROGRAMDATA",
+    "PROGRAMFILES",
+    "PROGRAMFILES(X86)",
+    "PROGRAMW6432",
+    "COMMONPROGRAMFILES",
+    "COMMONPROGRAMFILES(X86)",
+    "USERNAME",
+    "USERDOMAIN",
+    "COMPUTERNAME",
+    "CLAUDE_CODE_GIT_BASH_PATH",
+)
 _DROP_PREFIXES = ("PYTHON", "VIRTUAL_ENV", "PIP_", "CONDA")
+
+
+VENV_BIN = "Scripts" if sys.platform == "win32" else "bin"
+"""The directory of a venv that holds its executables."""
+VENV_PYTHON = "python.exe" if sys.platform == "win32" else "python"
 
 
 def orchestrator_venv_bin() -> Path | None:
     """The bin directory of the venv the orchestrator itself runs from, if any."""
     if sys.prefix != sys.base_prefix:
-        return Path(sys.prefix) / ("Scripts" if os.name == "nt" else "bin")
+        return Path(sys.prefix) / VENV_BIN
     return None
 
 
@@ -46,7 +81,8 @@ def build_env(
     """
     base = os.environ if base is None else base
     env: dict[str, str] = {}
-    for k in _KEEP:
+    keep = _KEEP + _KEEP_WINDOWS if sys.platform == "win32" else _KEEP
+    for k in keep:
         if k in base:
             env[k] = base[k]
     env["PATH"] = scrubbed_path(base.get("PATH", "/usr/bin:/bin"), prepend=prepend_path or [])
@@ -62,11 +98,11 @@ def build_env(
 def worktree_venv_bin(worktree: Path) -> Path | None:
     """The mkenv-style venv inside a worktree, if one exists."""
     for candidate in sorted(worktree.glob("python-env-*")):
-        b = candidate / "bin"
-        if (b / "python").exists():
+        b = candidate / VENV_BIN
+        if (b / VENV_PYTHON).exists():
             return b
     for name in (".venv", "venv"):
-        b = worktree / name / "bin"
-        if (b / "python").exists():
+        b = worktree / name / VENV_BIN
+        if (b / VENV_PYTHON).exists():
             return b
     return None

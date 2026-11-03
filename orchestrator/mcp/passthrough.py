@@ -38,7 +38,7 @@ class MCPError(Exception):
 
 
 def _load_file(path: Path) -> dict[str, Any]:
-    text = path.read_text()
+    text = path.read_text(encoding="utf-8")
     suffix = path.suffix.lower()
     if suffix == ".toml":
         return tomllib.loads(text)

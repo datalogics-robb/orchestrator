@@ -1,0 +1,3 @@
+# Windows runs batch files only with CRLF endings; sh and Git Bash need LF.
+*.cmd text eol=crlf
+bin/orchestrator text eol=lf

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import sys
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -73,7 +72,7 @@ class Runtime:
     def render(self, name: str, **ctx: Any) -> str:
         override = self.cfg.agents.prompt_overrides.get(name.removesuffix(".md"))
         if override:
-            template = self.jinja.from_string(Path(override).read_text())
+            template = self.jinja.from_string(Path(override).read_text(encoding="utf-8"))
         else:
             template = self.jinja.get_template(name)
         return template.render(**ctx)
@@ -225,7 +224,3 @@ def redactor_for(cfg: Config) -> Redactor:
         except Exception:  # noqa: BLE001
             continue
     return redactor
-
-
-def platform_name() -> str:
-    return "darwin" if sys.platform == "darwin" else "linux"

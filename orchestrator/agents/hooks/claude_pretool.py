@@ -13,13 +13,30 @@ import re
 import sys
 
 
+def _norm(path: str) -> str:
+    """The real path, case-folded and with backslashes on Windows, where paths compare that way."""
+    return os.path.normcase(os.path.realpath(path))
+
+
 def _under(path: str, roots: list[str]) -> bool:
-    real = os.path.realpath(path)
+    real = _norm(path)
     for root in roots:
-        r = os.path.realpath(root)
-        if real == r or real.startswith(r.rstrip("/") + "/"):
+        r = _norm(root)
+        if real == r or real.startswith(r.rstrip(os.sep) + os.sep):
             return True
     return False
+
+
+def _mentions(command: str, path: str) -> bool:
+    """Whether a shell command names `path`; on Windows also in Git Bash's C:/x and /c/x spellings."""
+    if os.name != "nt":
+        return path in command
+    cmd = command.replace("\\", "/").lower()
+    p = path.replace("\\", "/").rstrip("/").lower()
+    spellings = {p}
+    if len(p) > 1 and p[1] == ":":
+        spellings.add(f"/{p[0]}{p[2:]}")
+    return any(s in cmd for s in spellings)
 
 
 _COMMIT = re.compile(r"\bgit\b[^|;&]*?\bcommit\b([^|;&]*)")
@@ -44,7 +61,7 @@ def decide(payload: dict, rules: dict) -> str | None:
     tool = payload.get("tool_name", "")
     inp = payload.get("tool_input", {}) or {}
 
-    if tool == "Bash":
+    if tool in ("Bash", "PowerShell"):
         cmd = str(inp.get("command", ""))
         squashed = re.sub(r"\s+", " ", cmd).strip()
         for prefix in rules.get("deny_commands", []):
@@ -57,7 +74,7 @@ def decide(payload: dict, rules: dict) -> str | None:
                 if re.search(pat, squashed):
                     return "this role has read-only access; no commands that write"
         for ro in rules.get("read_only_paths", []):
-            if ro in cmd:
+            if _mentions(cmd, ro):
                 for pat in rules.get("write_patterns", []):
                     if re.search(pat, squashed):
                         return f"{ro} is a read-only share"
@@ -79,10 +96,10 @@ def main() -> int:
     if len(sys.argv) < 2:
         return 0
     try:
-        with open(sys.argv[1]) as f:
+        with open(sys.argv[1], encoding="utf-8") as f:
             rules = json.load(f)
-        payload = json.load(sys.stdin)
-    except (OSError, json.JSONDecodeError):
+        payload = json.loads(sys.stdin.buffer.read().decode("utf-8", errors="replace"))
+    except (OSError, ValueError):
         return 0
     reason = decide(payload, rules)
     if reason:

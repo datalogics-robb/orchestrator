@@ -115,7 +115,7 @@ async def _run_agent(
     rc = rt.cfg.agents.role(role)
     run_dir = rt.task_dir(task.key) / label
     run_dir.mkdir(parents=True, exist_ok=True)
-    (run_dir / "prompt.md").write_text(prompt)
+    (run_dir / "prompt.md").write_text(prompt, encoding="utf-8")
     system_prompt = rt.render(f"{role}.system.md", role=rc, task=task)
     request = AgentRequest(
         cwd=cwd,
@@ -155,7 +155,7 @@ async def _run_agent(
         error=rt.redactor.redact(result.error) if result.error else None,
     )
     (run_dir / "result.json").write_text(
-        json.dumps(rt.redactor.redact_obj(result.__dict__), indent=2, default=str)
+        json.dumps(rt.redactor.redact_obj(result.__dict__), indent=2, default=str), encoding="utf-8"
     )
     if result.cost_usd:
         task.cost_usd += result.cost_usd
@@ -312,13 +312,13 @@ async def stage_context(rt: Runtime, spec: TaskSpec, task: TaskState) -> State:
         )
     if issue.attachments:
         lines += ["## Attachments", ""]
-    (ctx_dir / "issue.md").write_text("\n".join(lines))
-    (ctx_dir / "issue.json").write_text(json.dumps(issue.raw, indent=2))
+    (ctx_dir / "issue.md").write_text("\n".join(lines), encoding="utf-8")
+    (ctx_dir / "issue.json").write_text(json.dumps(issue.raw, indent=2), encoding="utf-8")
     if issue.comments:
         parts = ["# Comments", ""]
         for author, created, body in issue.comments:
             parts += [f"## {author} ({created})", "", body, ""]
-        (ctx_dir / "comments.md").write_text("\n".join(parts))
+        (ctx_dir / "comments.md").write_text("\n".join(parts), encoding="utf-8")
     downloaded = []
     for att in issue.attachments:
         if att.size <= rt.cfg.tracker.attachment_max_bytes and att.url:
@@ -333,7 +333,7 @@ async def stage_context(rt: Runtime, spec: TaskSpec, task: TaskState) -> State:
         else:
             downloaded.append(f"- {att.filename} ({att.size} bytes): over the size cap, not downloaded")
     if downloaded:
-        with (ctx_dir / "issue.md").open("a") as f:
+        with (ctx_dir / "issue.md").open("a", encoding="utf-8") as f:
             f.write("\n".join(downloaded) + "\n")
     if rt.confluence and rt.cfg.confluence:
         conf_dir = ctx_dir / "confluence"
@@ -344,9 +344,9 @@ async def stage_context(rt: Runtime, spec: TaskSpec, task: TaskState) -> State:
                 safe = (
                     "".join(c if c.isalnum() or c in "-_ " else "_" for c in title).strip().replace(" ", "-")
                 )
-                (conf_dir / f"{safe}.md").write_text(f"# {title}\n\nSource: {url}\n\n{md}")
+                (conf_dir / f"{safe}.md").write_text(f"# {title}\n\nSource: {url}\n\n{md}", encoding="utf-8")
             except ConfluenceError as e:
-                (conf_dir / "errors.md").open("a").write(f"- {url}: {e}\n")
+                (conf_dir / "errors.md").open("a", encoding="utf-8").write(f"- {url}: {e}\n")
     task.summary = issue.summary
     return "WORKTREE"
 
@@ -613,7 +613,7 @@ async def stage_review(rt: Runtime, spec: TaskSpec, task: TaskState) -> State:
     wt = _worktree(rt, task)
     diff = await rt.worktrees.diff(wt)
     diff_path = rt.task_dir(task.key) / f"diff-r{task.round}.patch"
-    diff_path.write_text(diff)
+    diff_path.write_text(diff, encoding="utf-8")
     cwd = await review_cwd(rt, task, wt)
     ctx = _prompt_common(rt, spec, task, wt, "reviewer")
     ctx.update(
@@ -781,7 +781,7 @@ async def stage_pr(rt: Runtime, spec: TaskSpec, task: TaskState) -> State:
     wt = _worktree(rt, task)
     title = rt.cfg.repo.pr.title_template.format(key=task.key, summary=spec.issue.summary)[:250]
     body = pr_body(rt, spec, task)
-    (rt.task_dir(task.key) / "pr-body.md").write_text(body)
+    (rt.task_dir(task.key) / "pr-body.md").write_text(body, encoding="utf-8")
     if rt.dry_run or rt.github is None:
         rt.audit.record("pr_skipped", task.key, title=title, dry_run=True)
         task.pr_url = None
@@ -867,7 +867,7 @@ async def handle_blocked(rt: Runtime, spec: TaskSpec, task: TaskState, blocked: 
     task.error = blocked.reason
     md = findings_report.findings_markdown(rt, spec, task, blocked)
     path = rt.task_dir(task.key) / "findings.md"
-    path.write_text(md)
+    path.write_text(md, encoding="utf-8")
     task.findings_path = str(path)
     comment = f"Agent run {rt.run_id} could not complete {task.key} ({blocked.reason}). See the attached findings.md."
     await _jira_writeback(

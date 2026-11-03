@@ -46,15 +46,21 @@ def stage_helper(
 ) -> tuple[Path, dict[str, str]]:
     """Write the grants manifest and a PATH shim for orchestrator-cp.
 
+    The shim is a shell script, which Git Bash also runs on Windows; Windows gets an
+    `orchestrator-cp.cmd` beside it for agents whose commands run in cmd or PowerShell.
     Returns (bin_dir to prepend to PATH, env vars the helper needs).
     """
     bin_dir = run_dir / "bin"
     bin_dir.mkdir(parents=True, exist_ok=True)
     manifest = run_dir / "grants.json"
-    manifest.write_text(json.dumps(grants_manifest(grants), indent=2))
+    manifest.write_text(json.dumps(grants_manifest(grants), indent=2), encoding="utf-8")
+    python = Path(sys.executable)
+    script = Path(cp.__file__).resolve()
     shim = bin_dir / "orchestrator-cp"
-    shim.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{Path(cp.__file__).resolve()}" "$@"\n')
+    shim.write_text(f'#!/bin/sh\nexec "{python.as_posix()}" "{script.as_posix()}" "$@"\n', encoding="utf-8")
     shim.chmod(shim.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    if sys.platform == "win32":
+        (bin_dir / "orchestrator-cp.cmd").write_text(f'@"{python}" "{script}" %*\r\n', encoding="utf-8")
     return bin_dir, {
         cp.GRANTS_ENV: str(manifest),
         cp.AUDIT_ENV: str(audit_path),
@@ -88,7 +94,7 @@ def check_shares(cfg: Config, platform: str = sys.platform) -> list[Problem]:
                 continue
             probe = root / ".orchestrator-probe"
             try:
-                probe.write_text("probe")
+                probe.write_text("probe", encoding="utf-8")
                 probe.unlink()
             except OSError as e:
                 problems.append(Problem("error", f"share {name}: cannot write under {root}: {e}"))

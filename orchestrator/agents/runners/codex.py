@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sys
 import tempfile
 import tomllib
 from pathlib import Path
@@ -106,6 +107,14 @@ class CodexRunner:
         ):
             problems.append(Problem("error", "codex: use_cli_login set but no auth.json; run `codex login`"))
         problems += common.soft_limit_warnings(role, turn_cap=False, budget_cap=False)
+        if sys.platform == "win32":
+            problems.append(
+                Problem(
+                    "warning",
+                    "codex: on Windows, --sandbox is not the Seatbelt or Landlock sandbox the read-only "
+                    "reviewer relies on elsewhere; confirm your Codex version enforces it there",
+                )
+            )
         return problems
 
     async def check_live(self, role: RoleConfig, env: dict[str, str]) -> list[Problem]:
@@ -118,7 +127,7 @@ class CodexRunner:
             return []  # preflight already reported the missing binary
         with tempfile.TemporaryDirectory(prefix="orchestrator-codex-check-") as tmp:
             home = Path(tmp)
-            (home / "config.toml").write_text(render_config_toml({}, {}))
+            (home / "config.toml").write_text(render_config_toml({}, {}), encoding="utf-8")
             env = dict(env)
             env["CODEX_HOME"] = str(home)
             try:
@@ -168,7 +177,7 @@ class CodexRunner:
 
     def argv(self, request: AgentRequest, home: Path) -> list[str]:
         schema_path = home / "schema.json"
-        schema_path.write_text(json.dumps(strict_schema(request.schema)))
+        schema_path.write_text(json.dumps(strict_schema(request.schema)), encoding="utf-8")
         sandbox = "read-only" if request.access.worktree == "read-only" else "workspace-write"
         argv = ["codex", "exec"]
         if request.session:
@@ -192,17 +201,19 @@ class CodexRunner:
 
     async def run(self, request: AgentRequest) -> AgentResult:
         home = common.config_home(request, "codex-home")
-        (home / "config.toml").write_text(render_config_toml(request.mcp_servers, request.deny_tools))
+        (home / "config.toml").write_text(
+            render_config_toml(request.mcp_servers, request.deny_tools), encoding="utf-8"
+        )
         rules_dir = home / "rules"
         rules_dir.mkdir(exist_ok=True)
         (rules_dir / "orchestrator.rules").write_text(
-            render_rules(request.deny_commands or common.DEFAULT_DENY_COMMANDS)
+            render_rules(request.deny_commands or common.DEFAULT_DENY_COMMANDS), encoding="utf-8"
         )
         env = dict(request.env)
         env["CODEX_HOME"] = str(home)
         await self._ensure_login(home, env, env.get("OPENAI_API_KEY"), request.cli_login)
         argv = self.argv(request, home)
-        (request.run_dir / "argv.json").write_text(json.dumps(argv, indent=2))
+        (request.run_dir / "argv.json").write_text(json.dumps(argv, indent=2), encoding="utf-8")
         prompt = request.prompt
         if request.session:
             prompt = request.prompt  # schema was fixed when the session was created
@@ -219,7 +230,7 @@ class CodexRunner:
             return AgentResult(False, "timeout", stderr_tail=tail(outcome.stderr))
         session_id, usage, errors = self._parse_events(outcome.stdout)
         last_path = request.run_dir / "last-message.txt"
-        raw = last_path.read_text() if last_path.exists() else outcome.stdout
+        raw = last_path.read_text(encoding="utf-8") if last_path.exists() else outcome.stdout
         structured = extract_json(raw)
         ok = outcome.exit_code == 0 and structured is not None
         if ok:

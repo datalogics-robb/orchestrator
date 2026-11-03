@@ -32,7 +32,7 @@ sequencing, isolation, credentials, validation, and the paper trail.
 | Worker sandbox | Claude Code with permissions bypassed, relying on worktree isolation | Compensating controls are mandatory: scrubbed environment, no tokens in the agent process, hooks that block `git push` and `gh`, hard turn and time limits. See section 7. |
 | Concurrency | Parallel from day one, configurable N | asyncio scheduler, one worktree and one agent session per issue, a global build semaphore. |
 | Confluence | Publish findings and run reports to a configured space | Confluence links listed in config are also fetched read-only as agent context (this was in the original brief and is kept). |
-| Network shares | The worker may copy files from the support share to the raid share as part of the Jira work | Shares are declared in YAML with per-platform paths (`/Volumes/support` on macOS, `/support` on Linux). Source is read-only, destination is read-write under configured roots. Grants flow into each adapter's sandbox flags and a copy helper logs every transfer (section 4.5). |
+| Network shares | The worker may copy files from the support share to the raid share as part of the Jira work | Shares are declared in YAML with per-platform paths (`/Volumes/support` on macOS, `/support` on Linux, a UNC path or mapped drive on Windows). Source is read-only, destination is read-write under configured roots. Grants flow into each adapter's sandbox flags and a copy helper logs every transfer (section 4.5). |
 | MCP servers | Agents get the MCP servers already configured for each CLI, filtered by an allowlist per role | The orchestrator extracts named server definitions from the existing CLI configs and writes a per-run MCP config, so isolation flags stay on while the agents keep Jenkins, RAGFlow, and similar tools (section 4.6). |
 
 ## 3. End-to-end flow
@@ -289,9 +289,9 @@ worker can do the copy at the point in its work where it makes sense and the res
 pipeline is unchanged.
 
 - **Declaration.** `shares:` in YAML names each share and gives its mount path per
-  platform. The orchestrator resolves the path for the machine it is running on (`darwin`
-  or `linux`) and exposes both the name and the resolved path to prompts, so the same
-  config file works on a Mac workstation and a Linux box.
+  platform. The orchestrator resolves the path for the machine it is running on (`darwin`,
+  `linux`, or `windows`) and exposes both the name and the resolved path to prompts, so the
+  same config file works on a Mac workstation, a Linux box, and a Windows PC.
 - **Grants per role.** Each role lists the shares it may use and in which mode. The
   default gives the worker `support: read` and `raid: read-write`; the reviewer gets both
   as `read` so it can verify that a copy happened without being able to alter anything.
@@ -734,7 +734,8 @@ Two things cross the per-run boundary and are documented rather than hidden:
 
 - Per-role `max_turns`, wall-clock timeout, and `max_budget_usd`; exceeding any one is
   `FAILED` with the partial diff kept for inspection.
-- Build and test timeouts kill the whole process group.
+- Build and test timeouts kill the whole process group (on Windows, the process tree, with
+  `taskkill /T /F`; `orchestrator/oscompat.py` holds every such platform difference).
 - Concurrency cap plus build semaphore keep the workstation usable.
 
 ### 7.5 Audit

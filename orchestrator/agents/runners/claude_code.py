@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import sys
 import tempfile
@@ -81,7 +82,7 @@ class ClaudeCodeRunner:
                 if role.options.get("bare", True):
                     argv.append("--bare")
             mcp = home / "mcp.json"
-            mcp.write_text(json.dumps({"mcpServers": {}}))
+            mcp.write_text(json.dumps({"mcpServers": {}}), encoding="utf-8")
             argv += ["--mcp-config", str(mcp), "--strict-mcp-config"]
             if role.model:
                 argv += ["--model", role.model]
@@ -103,17 +104,17 @@ class ClaudeCodeRunner:
 
     def _settings(self, request: AgentRequest, home: Path) -> Path:
         rules_path = home / "hook-rules.json"
-        rules_path.write_text(json.dumps(common.hook_rules(request), indent=2))
+        rules_path.write_text(json.dumps(common.hook_rules(request), indent=2), encoding="utf-8")
         hook_script = Path(hooks.__file__).parent / "claude_pretool.py"
         settings = {
             "hooks": {
                 "PreToolUse": [
                     {
-                        "matcher": "Bash|Edit|Write|MultiEdit|NotebookEdit",
+                        "matcher": "Bash|PowerShell|Edit|Write|MultiEdit|NotebookEdit",
                         "hooks": [
                             {
                                 "type": "command",
-                                "command": f"{sys.executable} {hook_script} {rules_path}",
+                                "command": hook_command(hook_script, rules_path),
                                 "timeout": 20,
                             }
                         ],
@@ -122,19 +123,19 @@ class ClaudeCodeRunner:
             }
         }
         path = home / "settings.json"
-        path.write_text(json.dumps(settings, indent=2))
+        path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
         return path
 
     def _mcp_config(self, request: AgentRequest, home: Path) -> Path:
         path = home / "mcp.json"
-        path.write_text(json.dumps({"mcpServers": request.mcp_servers}, indent=2))
+        path.write_text(json.dumps({"mcpServers": request.mcp_servers}, indent=2), encoding="utf-8")
         return path
 
     def argv(self, request: AgentRequest, home: Path) -> list[str]:
         settings = self._settings(request, home)
         mcp = self._mcp_config(request, home)
         schema_path = home / "schema.json"
-        schema_path.write_text(json.dumps(request.schema))
+        schema_path.write_text(json.dumps(request.schema), encoding="utf-8")
         argv = ["claude", "-p", "--output-format", "json"]
         if request.options.get("bare", True) and not request.cli_login:
             argv.append("--bare")
@@ -151,7 +152,7 @@ class ClaudeCodeRunner:
             argv += ["--effort", str(request.options["effort"])]
         if request.system_prompt:
             sp = home / "system-prompt.md"
-            sp.write_text(request.system_prompt)
+            sp.write_text(request.system_prompt, encoding="utf-8")
             argv += ["--append-system-prompt-file", str(sp)]
         argv += ["--add-dir", str(request.cwd)]
         for p in request.access.readable_paths:
@@ -174,7 +175,7 @@ class ClaudeCodeRunner:
             # the subscription login lives in the user's config dir; keep pointing at it
             env["CLAUDE_CONFIG_DIR"] = os.environ["CLAUDE_CONFIG_DIR"]
         argv = self.argv(request, home)
-        (request.run_dir / "argv.json").write_text(json.dumps(argv, indent=2))
+        (request.run_dir / "argv.json").write_text(json.dumps(argv, indent=2), encoding="utf-8")
         outcome = await run_process(
             argv,
             cwd=request.cwd,
@@ -198,6 +199,19 @@ class ClaudeCodeRunner:
                 error="claude did not return JSON",
             )
         return result_from_output(data, exit_code=outcome.exit_code, stderr_tail=tail(outcome.stderr))
+
+
+def hook_command(hook_script: Path, rules_path: Path) -> str:
+    """The shell command that runs the hook, quoted so paths with spaces survive.
+
+    Claude Code runs hook commands through a shell: sh on POSIX, Git Bash on Windows. Windows
+    paths are given with forward slashes in double quotes, which Git Bash and cmd both read
+    literally; a backslash would be an escape character to bash.
+    """
+    parts = [Path(sys.executable), hook_script, rules_path]
+    if sys.platform == "win32":
+        return " ".join(f'"{p.as_posix()}"' for p in parts)
+    return shlex.join(str(p) for p in parts)
 
 
 def result_from_output(data: dict, *, exit_code: int | None, stderr_tail: str = "") -> AgentResult:
