@@ -667,9 +667,35 @@ process boundary rather than from Claude Code's permission prompts.
   rather than whatever token the shell happens to export; that is what `token_env` is for.
 - Only the orchestrator process talks to Jira, Confluence, and GitHub APIs. Agents get
   files, not tokens.
-- The GitHub token needs `repo` scope only; recommend a fine-grained token limited to
-  the target repository. The Jira token is the operator's own (section 2, Identity), so
-  comments carry the operator's name, and their text says they come from an agent run.
+- The GitHub token is used for four operations, all against `repo.github`: pushing the
+  task branch to `repo.remote` (`git push --force-with-lease`, `scm/worktree.py`), finding
+  an open PR for that branch (`gh pr list`), opening or updating the draft PR (`gh pr
+  create`, `gh pr edit`), and the `doctor` checks (`gh auth status`, `gh repo view`). The
+  last three are in `scm/github.py`. Recommend a fine-grained token whose resource owner
+  owns the target repository (an organization may need to approve it), with access
+  limited to that one repository and these permissions:
+
+  | Permission | Access | Needed for |
+  |---|---|---|
+  | Metadata | Read | Every call; added automatically |
+  | Contents | Read and write | Pushing the task branch |
+  | Pull requests | Read and write | Listing, creating, and editing the PR; requesting individual reviewers |
+
+  Some configurations need more:
+
+  | Permission | Access | When |
+  |---|---|---|
+  | Issues | Read and write | `pr.labels` is non-empty; `gh` applies labels through the Issues API |
+  | Organization: Members | Read | `pr.reviewers` names a team (`org/team`) |
+  | Workflows | Read and write | A task's change touches `.github/workflows/` |
+
+  A classic token needs `repo` scope, plus `read:org` for team reviewers. The push passes
+  the token through a one-off HTTPS credential helper. Git ignores that helper for an SSH
+  remote (`git@github.com:…`), so the push then authenticates with the operator's SSH key
+  and only the `gh` calls use the token. Grant Contents write anyway, so a switch to an
+  HTTPS remote, or a machine without that key, still works.
+- The Jira token is the operator's own (section 2, Identity), so comments carry the
+  operator's name, and their text says they come from an agent run.
 
 ### 7.2 Agent process environment
 
