@@ -57,7 +57,9 @@ def _task_dir(root: str, run: str, key: str) -> str:
 
 
 def _git(checkout: str, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(["git", "-C", checkout, *args], capture_output=True, text=True, check=check)
+    return subprocess.run(
+        ["git", "-C", checkout, *args], capture_output=True, text=True, encoding="utf-8", check=check
+    )
 
 
 def _alive(pid: int) -> bool:
@@ -84,7 +86,7 @@ def _running_jobs(root: str) -> int:
                 continue
             for f in os.listdir(jobs):
                 try:
-                    with open(os.path.join(jobs, f)) as fh:
+                    with open(os.path.join(jobs, f), encoding="utf-8") as fh:
                         if _alive(int(fh.read().strip())):
                             count += 1
                 except (OSError, ValueError):
@@ -198,7 +200,7 @@ def op_sync(args: argparse.Namespace) -> int:
             deleted += 1
     files = 0
     size = 0
-    with tarfile.open(fileobj=stdin, mode="r|gz") as tar:
+    with tarfile.open(fileobj=stdin, mode="r|gz", encoding="utf-8") as tar:
         for member in tar:
             target = _inside(src, member.name)
             if member.isdir():
@@ -238,6 +240,8 @@ def _kill_group(pgid: int) -> None:
 
     A group holding only zombies answers EPERM on some systems, which means it is gone too.
     """
+    if sys.platform == "win32":
+        raise Refused("build machines are POSIX")
     for sig, wait in ((signal.SIGTERM, KILL_GRACE_SECONDS), (signal.SIGKILL, 0)):
         try:
             os.killpg(pgid, sig)
@@ -253,6 +257,8 @@ def _kill_group(pgid: int) -> None:
 
 
 def op_run(args: argparse.Namespace) -> int:
+    if sys.platform == "win32":
+        raise Refused("build machines are POSIX")
     task_dir = _task_dir(args.root, args.run, args.key)
     src = os.path.join(task_dir, "src")
     job = _name(args.job, "job name")
@@ -275,7 +281,7 @@ def op_run(args: argparse.Namespace) -> int:
         print(f"orchestrator-node: command not found: {args.argv[0]}", file=sys.stderr)
         return 127
     pid_file = os.path.join(task_dir, "jobs", job + ".pid")
-    with open(pid_file, "w") as fh:
+    with open(pid_file, "w", encoding="utf-8") as fh:
         fh.write(str(proc.pid))
 
     def watch_stdin() -> None:
@@ -312,7 +318,7 @@ def op_cancel(args: argparse.Namespace) -> int:
         _task_dir(args.root, args.run, args.key), "jobs", _name(args.job, "job name") + ".pid"
     )
     try:
-        with open(pid_file) as fh:
+        with open(pid_file, encoding="utf-8") as fh:
             pid = int(fh.read().strip())
     except (OSError, ValueError):
         print(json.dumps({"cancelled": False}))

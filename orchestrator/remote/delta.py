@@ -67,7 +67,7 @@ def write_payload(worktree: Path, delta: list[Change], out: Path) -> dict[str, i
         fh.write(json.dumps({"delete": deleted}).encode() + b"\n")
         with (
             gzip.GzipFile(fileobj=fh, mode="wb", compresslevel=6) as gz,
-            tarfile.open(fileobj=gz, mode="w|") as tar,
+            tarfile.open(fileobj=gz, mode="w|", encoding="utf-8") as tar,
         ):
             for c in sent:
                 local = worktree / c.path

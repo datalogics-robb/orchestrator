@@ -156,7 +156,7 @@ class RemoteBuilds:
                     raise _failed(e) from e
             text = outcome.stdout + ("\n--- stderr ---\n" + outcome.stderr if outcome.stderr else "")
             log_path = log_dir / f"{job}.log"
-            log_path.write_text(text.replace(remote_src, str(wt.path)))
+            log_path.write_text(text.replace(remote_src, str(wt.path)), encoding="utf-8")
             step.results.append(CommandResult(argv, outcome.exit_code, outcome.timed_out, log_path))
             rt.audit.record(
                 "remote_command",

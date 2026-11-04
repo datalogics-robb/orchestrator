@@ -10,14 +10,13 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import shlex
-import signal
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
+from orchestrator import oscompat
 from orchestrator.config.schema import NodeConfig, PlatformConfig
 from orchestrator.remote.node import VERSION as NODE_VERSION
 
@@ -138,19 +137,13 @@ class RunOutcome:
     stderr: str
 
 
-def _kill_group(pid: int, sig: int) -> None:
-    try:
-        os.killpg(os.getpgid(pid), sig)
-    except ProcessLookupError:
-        pass
-
-
 async def _stop(proc: asyncio.subprocess.Process) -> None:
-    _kill_group(proc.pid, signal.SIGTERM)
+    """Stop the local ssh (or node) process and its descendants: asked first, then forced."""
+    oscompat.kill_tree(proc.pid, force=False)
     try:
         await asyncio.wait_for(proc.wait(), KILL_GRACE)
     except TimeoutError:
-        _kill_group(proc.pid, signal.SIGKILL)
+        oscompat.kill_tree(proc.pid, force=True)
         await proc.wait()
 
 
@@ -174,7 +167,7 @@ class NodeClient:
             stdin=asyncio.subprocess.PIPE if stdin is not None else asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            start_new_session=True,
+            **oscompat.process_group_kwargs(),
         )
         data = stdin.read_bytes() if isinstance(stdin, Path) else stdin
         try:
@@ -264,7 +257,7 @@ class NodeClient:
             stdin=asyncio.subprocess.PIPE,  # held open: EOF tells the node to kill the job
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            start_new_session=True,
+            **oscompat.process_group_kwargs(),
         )
         assert proc.stdout and proc.stderr
         reads = asyncio.gather(proc.stdout.read(), proc.stderr.read())
