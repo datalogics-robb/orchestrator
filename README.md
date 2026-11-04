@@ -159,8 +159,8 @@ runtime and model, what it is doing (`work`, `fix-2`, `review-1`), its status, t
 elapsed time, turns, and cost. It refreshes every 5 seconds.
 
 The Runs tab lists recent runs and adds work: enter issue or epic keys, pick a workflow, and
-submit. **Dry run** is checked by default; unchecking it asks for confirmation, because a real
-run pushes, opens PRs, and writes to Jira. The daemon reads the issues from Jira first (an epic
+submit. **Dry run** is unchecked by default, since a dry run still spends tokens; submitting a real
+run asks for confirmation, because it pushes, opens PRs, and writes to Jira. The daemon reads the issues from Jira first (an epic
 expands to its children), so a bad key is refused on the spot, and so is a key that already has
 an unfinished task in a queued, running, or paused run. Each submission becomes one run, which
 waits as `queued` while `web.max_concurrent_runs` runs (default 1) are already going, and while

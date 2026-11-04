@@ -70,12 +70,12 @@
           </select>
         </label>
         <label class="check">
-          <input type="checkbox" id="dry-run" name="dry_run" checked>
+          <input type="checkbox" id="dry-run" name="dry_run">
           <span>Dry run</span>
         </label>
         <button type="submit" class="primary" id="submit-button">Add to work</button>
-        <p class="hint" id="dry-hint">A dry run does everything locally: no push, no PR, no Jira or Confluence writes.</p>
-        <p class="hint live" id="live-hint" hidden>Not a dry run: this pushes branches, opens draft PRs, and writes to Jira.</p>
+        <p class="hint" id="dry-hint" hidden>A dry run still runs the agents and spends tokens, but stays local: no push, no PR, no Jira or Confluence writes.</p>
+        <p class="hint live" id="live-hint">Not a dry run: this pushes branches, opens draft PRs, and writes to Jira.</p>
         <p class="result" id="submit-result" role="status" hidden></p>
       </form>
 
