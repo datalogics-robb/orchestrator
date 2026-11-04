@@ -15,6 +15,7 @@ import asyncio
 import contextlib
 import json
 import os
+import secrets
 import signal
 import socket
 import subprocess
@@ -43,6 +44,11 @@ PIDFILE = "serve.pid"
 STOPFILE = "serve.stop"
 LOGFILE = "serve.log"
 READY_TIMEOUT = 600.0
+DETACH_TOKEN_ENV = "ORCHESTRATOR_DETACH_TOKEN"
+"""Set by `detach` for the daemon it starts, which writes it into its record.
+
+The pid `detach` starts is not always the daemon's: a Windows venv's python.exe is a launcher that
+runs the real interpreter as its child, and a pyenv shim does the same on POSIX."""
 """How long `--detach` waits for the port; startup runs doctor's live probes, which can take minutes."""
 STOP_TIMEOUT = 30.0
 
@@ -54,6 +60,8 @@ class DaemonRecord:
     port: int
     url: str
     ready: bool = False
+    token: str = ""
+    """The token `detach` passed in DETACH_TOKEN_ENV; empty when started in the foreground."""
 
 
 class PidLock:
@@ -245,7 +253,8 @@ async def serve(
             )
         )
         url = url_for(web, web.port)
-        lock.write(DaemonRecord(os.getpid(), info.host, web.port, url, ready=False))
+        token = os.environ.pop(DETACH_TOKEN_ENV, "")  # popped: nothing this process starts inherits it
+        lock.write(DaemonRecord(os.getpid(), info.host, web.port, url, ready=False, token=token))
         runs.start()
         if cfg.web.resume_on_start:
             for run_id in await runs.resume_interrupted():
@@ -255,7 +264,7 @@ async def serve(
         while not server.started and not task.done():
             await asyncio.sleep(0.05)
         if server.started:
-            lock.write(DaemonRecord(os.getpid(), info.host, web.port, url, ready=True))
+            lock.write(DaemonRecord(os.getpid(), info.host, web.port, url, ready=True, token=token))
             say(f"serving {url} (pid {os.getpid()})")
             if not web.loopback and web.tls is None:
                 say(
@@ -292,6 +301,8 @@ def detach(cfg: Config, argv: list[str], say: Callable[[str], None] = print) -> 
     root = str(Path(__file__).resolve().parents[2])
     env["PYTHONPATH"] = root + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
     env["PYTHONUTF8"] = "1"  # serve.log is UTF-8 on every platform, not the Windows code page
+    token = secrets.token_hex(16)
+    env[DETACH_TOKEN_ENV] = token
     with log_path.open("a", encoding="utf-8") as log:
         proc = subprocess.Popen(
             [sys.executable, "-m", "orchestrator", *argv],
@@ -308,11 +319,11 @@ def detach(cfg: Config, argv: list[str], say: Callable[[str], None] = print) -> 
             say("the daemon exited during startup:\n" + "\n".join(tail))
             return 1
         record = read_record(cfg)
-        if record and record.pid == proc.pid and record.ready:
-            say(f"serving {record.url} (pid {proc.pid}); log: {log_path}")
+        if record and record.token == token and record.ready:
+            say(f"serving {record.url} (pid {record.pid}); log: {log_path}")
             return 0
         time.sleep(0.5)
-    say(f"the daemon (pid {proc.pid}) is still starting; see {log_path}")
+    say(f"the daemon (started as pid {proc.pid}) is still starting; see {log_path}")
     return 1
 
 

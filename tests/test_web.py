@@ -779,3 +779,36 @@ async def test_shutdown_from_the_page_interrupts_runs_and_stops_the_daemon(
     assert store.latest_agents(run_id)[("PROJ-1", "worker")].termination == "killed"
     audit = (cfg.runs_dir / run_id / "audit.jsonl").read_text()
     assert '"event": "daemon_shutdown"' in audit and '"client": "127.0.0.1"' in audit
+
+
+def test_detach_recognises_its_daemon_by_token_not_pid(
+    config_dict: dict, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = _config(config_dict)
+    started: dict[str, str] = {}
+
+    class Launcher:  # a venv launcher: the daemon it starts runs under another pid
+        pid = 111
+
+        def __init__(self, argv: list[str], **kw: object) -> None:
+            env = kw["env"]
+            assert isinstance(env, dict)
+            started["token"] = env[daemon.DETACH_TOKEN_ENV]
+
+        def poll(self) -> None:
+            return None
+
+    def record(token: str) -> daemon.DaemonRecord:
+        return daemon.DaemonRecord(222, "h", 8765, "http://127.0.0.1:8765/", ready=True, token=token)
+
+    monkeypatch.setattr(daemon.subprocess, "Popen", Launcher)
+    monkeypatch.setattr(daemon.time, "sleep", lambda _s: None)
+    said: list[str] = []
+    monkeypatch.setattr(daemon, "read_record", lambda _cfg: record(started["token"]))
+    assert daemon.detach(cfg, ["serve"], say=said.append) == 0
+    assert started["token"] and "(pid 222)" in said[-1]
+    # another daemon's record (or one from an earlier start) is not this one
+    monkeypatch.setattr(daemon, "READY_TIMEOUT", 0.05)
+    monkeypatch.setattr(daemon, "read_record", lambda _cfg: record("someone-else"))
+    assert daemon.detach(cfg, ["serve"], say=said.append) == 1
+    assert "still starting" in said[-1]
