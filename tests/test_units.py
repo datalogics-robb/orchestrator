@@ -17,7 +17,7 @@ from orchestrator.agents.contracts import (
     parse_worker,
 )
 from orchestrator.agents.hooks.claude_pretool import decide
-from orchestrator.agents.runners.codex import render_config_toml, render_rules
+from orchestrator.agents.runners.codex import render_config_toml, render_rules, windows_sandbox
 from orchestrator.build.selection import selector_for
 from orchestrator.config.schema import TestSelection as Selection
 from orchestrator.environment import build_env
@@ -129,6 +129,23 @@ def test_hook_edit_paths() -> None:
 
 
 # --- codex config rendering ---------------------------------------------------
+
+
+def test_codex_gets_a_windows_sandbox_mode_on_windows(monkeypatch: pytest.MonkeyPatch) -> None:
+    import tomllib
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    assert windows_sandbox({}) is None
+    assert "windows" not in tomllib.loads(render_config_toml({}, {}, windows_sandbox=None))
+    monkeypatch.setattr(sys, "platform", "win32")
+    assert windows_sandbox({}) == "unelevated"
+    assert windows_sandbox({"windows_sandbox": "elevated"}) == "elevated"
+    with pytest.raises(ValueError):
+        windows_sandbox({"windows_sandbox": "off"})
+    data = tomllib.loads(
+        render_config_toml({"j": {"url": "https://j/mcp"}}, {}, windows_sandbox="unelevated")
+    )
+    assert data["windows"]["sandbox"] == "unelevated" and data["mcp_servers"]["j"]["url"] == "https://j/mcp"
 
 
 def test_codex_toml_and_rules() -> None:

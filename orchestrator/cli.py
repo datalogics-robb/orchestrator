@@ -190,6 +190,7 @@ agents:
     mcp_servers: [ragflow]
     options:
       reasoning_effort: high
+      # windows_sandbox: unelevated   # Windows hosts: unelevated (default) or elevated
 
 scheduler:
   max_parallel: 3

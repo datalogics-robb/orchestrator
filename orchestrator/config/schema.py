@@ -334,7 +334,8 @@ class RoleConfig(StrictModel):
     options: dict[str, Any] = Field(
         {},
         description=(
-            "Adapter-specific settings. claude-code: effort, bare. codex: reasoning_effort. "
+            "Adapter-specific settings. claude-code: effort, bare. codex: reasoning_effort, "
+            "windows_sandbox (unelevated, the default, or elevated; Windows hosts only). "
             "opencode: agent, variant. hermes: provider, reasoning."
         ),
     )

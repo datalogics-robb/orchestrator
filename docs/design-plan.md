@@ -983,7 +983,7 @@ codex exec \
 | `codex exec -` | Non-interactive; `-` reads the prompt from stdin. |
 | `--cd <worktree>` | Working root for the agent. |
 | `--sandbox read-only` | The reviewer cannot modify the tree; it can still read files and run read-only commands. The worker role would use `workspace-write`. |
-| generated `$CODEX_HOME/config.toml` | The per-run home holds a minimal `config.toml` with only this role's allowlisted `[mcp_servers.<name>]` blocks (copied from `~/.codex/config.toml`) and per-tool denials. The developer's own config is never loaded because `CODEX_HOME` points elsewhere, so `--ignore-user-config` is not needed. |
+| generated `$CODEX_HOME/config.toml` | The per-run home holds a minimal `config.toml` with only this role's allowlisted `[mcp_servers.<name>]` blocks (copied from `~/.codex/config.toml`) and per-tool denials. The developer's own config is never loaded because `CODEX_HOME` points elsewhere, so `--ignore-user-config` is not needed. On a Windows host it also sets `[windows] sandbox`: without it Codex rejects every command ("blocked by policy"), and the developer's own `elevated` setting cannot be reused because its one-time setup asks for administrator rights again in each fresh home. The mode is `unelevated` unless the role's `options.windows_sandbox` says `elevated`. |
 | `--add-dir <share>` (worker role only) | Grants write access to read-write shares alongside the worktree under `workspace-write`. The reviewer's `read-only` sandbox can already read both shares. |
 | `--ephemeral` | Reviewer runs are single-shot; no session files written. Omitted for a Codex worker so `codex exec resume <id>` can serve the fix round. |
 | `--model`, `-c model_reasoning_effort=` | From `agents.reviewer.model` and `options`. |
