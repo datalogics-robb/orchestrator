@@ -1,0 +1,169 @@
+# Orchestrator configuration. One file per target repository.
+# Secrets are never written here: name an environment variable (token_env) or a
+# ~/.netrc machine (netrc_machine) and the orchestrator resolves it at startup.
+version: 1
+
+tracker:
+  kind: jira
+  base_url: https://datalogics-jira.atlassian.net
+  project: APDFL
+  auth:
+    netrc_machine: datalogics-jira.atlassian.net      # login = account email, password = API token
+  statuses:
+    in_progress: "In Progress"
+    in_review: "Review"
+    blocked: ""
+  comment_on: [started, pr_opened, blocked, failed]
+  attachment_max_bytes: 26214400
+
+confluence:
+  base_url: https://datalogics-jira.atlassian.net/wiki
+  auth:
+    netrc_machine: datalogics-jira.atlassian.net
+  context_pages:                               # read-only reference for both agents
+    - https://datalogics-jira.atlassian.net/wiki/spaces/EN/pages/9413880/Coding+standards
+  publish:
+    space: ENG
+    parent_page_id: "9406301"
+    when: [blocked, completed]
+
+repo:
+  github: datalogics/pdfl18_all
+  remote: upstream                               # the clone's origin is a personal fork
+  base_branch: develop-21
+
+  clone_path: C:\Users\robb\Development\pdfl18_all       # existing clone; worktrees are created elsewhere
+  worktree_root: C:\Users\robb\Development\.orchestrator\worktrees
+  branch_template: "agent-{key}-{slug}"
+  pr:
+    draft: true
+    labels: []
+    reviewers: []
+    title_template: "{key}: {summary}"
+  auth:
+    token_env: GITHUB_TOKEN                    # used only by the orchestrator, never by agents
+
+shares:
+  support:
+    paths: {darwin: /Volumes/support, linux: /support, windows: "\\\\ivy\\support"}
+    expect_read_only_mount: true
+  raid:
+    paths: {darwin: /Volumes/raid, linux: /raid, windows: "\\\\ivy\\raid"}
+    write_under: [agent-drops]
+
+mcp:
+  sources:                                     # where each CLI already keeps MCP definitions
+    claude-code: [C:\Users\robb\.claude.json, .mcp.json]
+    codex: [C:\Users\robb\.codex/config.toml]
+  deny_tools:
+    mcp-jenkins: [triggerBuild, rebuildBuild, replayBuild, updateBuild]
+
+build:                                       # pdfl18; a pinned task runs setup and commands on its machine
+  setup:
+    - python3 mkenv.py                         # creates the worktree's own venv with invoke, conan, cmake
+    - invoke -e bootstrap -u --config=Release
+  local_setup:                                 # on this (Windows) host, for pinned tasks: the venv pre-commit uses
+    - python mkenv.py
+  commands:
+    - invoke -e build --config=Release
+  timeout_minutes: 180
+  env: {}
+  max_concurrent_builds: 1
+
+test:
+  timeout_minutes: 90
+  selection:
+    strategy: agent-chosen                     # the worker names the DevTest(s) it created, e.g. --tests=SF40586
+    allowed_prefixes:
+      - invoke -e test --config=Release
+    bare_test_template: "invoke -e test --config=Release --tests={ids}"   # bare test ids become one command
+    fallback: []
+    max_commands: 4
+  full_suite:
+    - invoke -e test --config=Release
+
+agents:
+  review_rounds: 2
+  prompt_overrides: {}
+  worker:
+    runner: claude-code
+    model: claude-opus-5-5
+    access: workspace-write
+    timeout_minutes: 240
+    max_turns: 400
+    max_budget_usd: 15
+    auth:
+      use_cli_login: true
+    shares:
+      support: read
+      raid: read-write
+    mcp_servers: [mcp-jenkins, ragflow]
+    options:
+      effort: high
+  reviewer:
+    runner: codex
+    model: gpt-6.1-sol
+    access: read-only
+    timeout_minutes: 60
+    max_budget_usd: 5
+    auth:
+      use_cli_login: true
+    shares:
+      support: read
+      raid: read
+    mcp_servers: [ragflow, mcp-jenkins]
+    options:
+      reasoning_effort: high
+
+commit:
+  squash: phases              # red commit (failing tests) stays separate; only work after it folds into green
+  pre_commit: true            # run the repo's pre-commit hooks on staged files before committing
+  install_hooks: true         # and install them in each worktree so agent commits run them too
+
+scheduler:
+  max_parallel: 3
+  retry_infra_failures: 2
+workflows:
+  # Jira types routed to the feature workflow (specify -> approve -> red tests -> implement -> review).
+  # Feature requests filed as Bug (e.g. APDFL-6891) are run with `run --workflow feature`.
+  feature_issue_types: [Story, New Feature, Feature, Improvement, Enhancement]
+  feature:
+    require_approval: true
+    spec_review: true
+    require_red: true
+    pause_after_red: true                      # a person inspects the committed tests and inputs before the implementation
+    # DevTests exit codes: 50 Failure is a real red; 55 ResourceProblem, 18 RequiresPlugin, and a
+    # missing input are not. ctest prints "(Failed)" for all of them, so the output text decides.
+    red_reject_patterns:
+      - "ResourceProblem"
+      - "RequiresPlugin"
+      - "No such file or directory"
+      - "could not open the input"
+      - "No tests were found"
+    review_rounds: 18
+    spec_revisions: 2
+    max_cost_usd: 500
+
+hooks:
+  after_worktree: []
+  before_pr: []
+
+platforms:                            # build machines for `run --platform NAME`, reached over ssh
+  linux-armv8:
+    aliases: [aarch64, arm64]
+    ssh: {user: rocky, identity_file: C:\Users\robb\.ssh\engineering-dl.pem}
+    root: /home/rocky/robb/orchestrator    # task directories and the node script
+    checkout: /home/rocky/robb/pdfl18_all    # optional clone to start task directories from
+    max_concurrent_builds: 1
+    nodes: [{host: 10.200.0.224}, {host: 10.200.0.78}]
+
+web:                                    # `orchestrator serve`: the status page and control
+  host: 127.0.0.1                       # any other address requires auth
+  port: 8765
+  # auth:
+  #   token_env: ORCHESTRATOR_WEB_TOKEN # the operator's token; browsers log in as user `operator`
+  public_read: false                    # true: anyone who reaches the port may view, never control
+  # tls: {certfile: ~/certs/orchestrator.pem, keyfile: ~/certs/orchestrator.key}
+  recent_minutes: 60
+  max_concurrent_runs: 1                # runs submitted from the page beyond this wait their turn
+  resume_on_start: false                # true: a restarted daemon picks up the runs it was driving
