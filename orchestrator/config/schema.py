@@ -248,7 +248,17 @@ class MCPConfig(StrictModel):
 class BuildConfig(StrictModel):
     """How the target project is built."""
 
-    setup: list[Command] = Field([], description="Commands run once per new worktree, e.g. python mkenv.py.")
+    setup: list[Command] = Field(
+        [],
+        description="Commands run once per new worktree, e.g. python mkenv.py. A task pinned to a build machine "
+        "runs them on that machine.",
+    )
+    local_setup: list[Command] = Field(
+        [],
+        description="Commands run in the local worktree of a task pinned to a build machine, for what the "
+        "orchestrator host itself needs (for pdfl18, the venv pre-commit runs from). A local task runs only "
+        "`setup`, which should cover them.",
+    )
     commands: list[Command] = Field(
         [], description="Build commands run after the worker finishes and after each fix."
     )
@@ -459,6 +469,93 @@ class WebTLS(StrictModel):
     keyfile: UserPath = Field(description="PEM private key for the certificate.")
 
 
+def _remote_path(value: str | None, where: str) -> None:
+    if value is not None and not value.startswith("/"):
+        raise ValueError(f"{where}: {value!r} must be an absolute path on the build machine")
+
+
+class SshConfig(StrictModel):
+    """How the orchestrator logs in to a platform's build machines. Host keys are always checked."""
+
+    user: str = Field(description="Login user on the build machines.")
+    identity_file: UserPath | None = Field(
+        None, description="Private key to log in with (`ssh -i`); omit to use ssh's own defaults."
+    )
+    known_hosts: UserPath | None = Field(
+        None,
+        description="Known-hosts file holding the machines' host keys; omit to use ssh's defaults "
+        "(~/.ssh/known_hosts). An unknown or changed host key fails the connection.",
+    )
+    port: int = Field(22, ge=1, le=65535, description="ssh port.")
+    connect_timeout_seconds: int = Field(15, ge=1, description="How long to wait for a connection.")
+
+
+class NodeConfig(StrictModel):
+    """One build machine of a platform."""
+
+    host: str = Field(description="Host name or address to ssh to.")
+    root: str | None = Field(None, description="Overrides the platform's `root` on this machine.")
+    checkout: str | None = Field(None, description="Overrides the platform's `checkout` on this machine.")
+
+
+class PlatformConfig(StrictModel):
+    """A platform tasks can be pinned to (`run --platform NAME`), and its build machines."""
+
+    aliases: list[str] = Field(
+        [], description="Other names the platform goes by in bug reports, e.g. aarch64."
+    )
+    ssh: SshConfig = Field(description="Login for every machine of this platform.")
+    root: str | None = Field(
+        None,
+        description="Absolute directory on each machine for task directories (`<root>/<run>/<key>/src`) and the "
+        "node script. Required here or on every node.",
+    )
+    checkout: str | None = Field(
+        None,
+        description="Absolute path of an existing clone of the repository on each machine. Task directories "
+        "become detached git worktrees of it, so the first sync sends only the task's changes. The orchestrator "
+        "only fetches into it (by URL, adding no remote) and adds and removes worktrees; its branch and files are "
+        "never touched. Omit to send every file on the first sync.",
+    )
+    fetch_url: str | None = Field(
+        None,
+        description="URL a machine's checkout fetches a missing base commit from; defaults to "
+        "`git@github.com:<repo.github>.git`.",
+    )
+    python: str = Field(
+        "python3", description="Python 3 interpreter on the machines that runs the node script."
+    )
+    max_concurrent_builds: int = Field(
+        1, ge=1, description="Commands the orchestrator runs at once on each machine, across all tasks."
+    )
+    env: dict[str, str] = Field(
+        {}, description="Environment variables for commands on the machines (`build.env` stays local)."
+    )
+    nodes: list[NodeConfig] = Field(min_length=1, description="The platform's build machines.")
+
+    @model_validator(mode="after")
+    def _paths(self) -> PlatformConfig:
+        _remote_path(self.root, "root")
+        _remote_path(self.checkout, "checkout")
+        for node in self.nodes:
+            _remote_path(node.root, f"nodes[{node.host}].root")
+            _remote_path(node.checkout, f"nodes[{node.host}].checkout")
+            if not (node.root or self.root):
+                raise ValueError(f"nodes[{node.host}]: no root, here or for the platform")
+        return self
+
+    def root_for(self, node: NodeConfig) -> str:
+        root = node.root or self.root
+        assert root is not None
+        return root.rstrip("/") or "/"
+
+    def checkout_for(self, node: NodeConfig) -> str | None:
+        return node.checkout or self.checkout
+
+    def node(self, host: str) -> NodeConfig | None:
+        return next((n for n in self.nodes if n.host == host), None)
+
+
 class WebConfig(StrictModel):
     """The `orchestrator serve` daemon: a web page showing agent status, controlled by one operator."""
 
@@ -532,6 +629,11 @@ class Config(StrictModel):
         WorkflowsConfig(), description="Bugfix versus feature workflow routing."
     )
     web: WebConfig = Field(WebConfig(), description="The `orchestrator serve` daemon and its web page.")
+    platforms: dict[str, PlatformConfig] = Field(
+        {},
+        description="Platforms whose builds and tests run on dedicated build machines over ssh, by name. A task "
+        "uses one only when pinned to it (`run --platform NAME`); every other task builds locally.",
+    )
 
     @model_validator(mode="after")
     def _cross_checks(self) -> Config:
@@ -544,6 +646,8 @@ class Config(StrictModel):
                     raise ValueError(
                         f"agents.{role_name}.shares.{share}: read-write needs access: workspace-write"
                     )
+        if "local" in self.platforms:
+            raise ValueError("platforms: 'local' is reserved; it means the orchestrator host")
         if self.test.selection.strategy == "named-suite" and not self.test.selection.commands:
             if self.test.selection.fallback:
                 object.__setattr__(self.test.selection, "commands", list(self.test.selection.fallback))

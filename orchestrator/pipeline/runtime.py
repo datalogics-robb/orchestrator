@@ -20,6 +20,7 @@ from orchestrator.config.loader import GH_TOKEN_COMMAND, netrc_login, resolve_se
 from orchestrator.config.schema import AuthRef, Config, Role
 from orchestrator.docs.confluence import ConfluenceClient
 from orchestrator.mcp import passthrough
+from orchestrator.remote.builds import RemoteBuilds
 from orchestrator.reporting.audit import AuditLog, Redactor
 from orchestrator.scm.github import GitHubHost
 from orchestrator.scm.worktree import WorktreeManager
@@ -61,8 +62,11 @@ class Runtime:
     github_token: str | None
     roles: dict[str, RoleRuntime]
     jinja: Environment
+    remote: RemoteBuilds
     dry_run: bool = False
     keep_worktrees: bool = False
+    platform: str | None = None
+    """`--platform`: the platform new tasks are pinned to; `local` or None leaves them local."""
     on_event: Callable[[str, str, str], None] = field(default=lambda key, state, note: None)
     """Progress callback: (key, state, note)."""
 
@@ -126,6 +130,7 @@ def build_runtime(
     dry_run: bool = False,
     keep_worktrees: bool = False,
     tracker: Tracker | None = None,
+    platform: str | None = None,
 ) -> Runtime:
     run_id = run_id or new_run_id()
     run_dir = cfg.runs_dir / run_id
@@ -189,8 +194,10 @@ def build_runtime(
         github_token=github_token,
         roles=roles,
         jinja=jinja,
+        remote=RemoteBuilds(cfg),
         dry_run=dry_run,
         keep_worktrees=keep_worktrees,
+        platform=platform,
     )
 
 

@@ -26,6 +26,7 @@ The approved specification is in `.orchestrator/context/spec.md`{% if decisions 
 4. Build: {% for c in build.commands %}`{{ c | join(' ') }}`{% if not loop.last %}, {% endif %}{% else %}(no build step declared){% endfor %}. Run the red tests and any group of existing tests that exercises the code you changed; each command must start with one of: {% for p in test.selection.allowed_prefixes %}`{{ p }}`{% if not loop.last %}, {% endif %}{% else %}(any){% endfor %}. Report all of them in `tests_selected`.
 5. Run `pre-commit run --files <your files>` if the repository has a `.pre-commit-config.yaml` and fix what it reports. Do not commit; the orchestrator commits this phase as the green commit.
 
+{% include '_platform.md' %}
 {% if shares %}
 ## Network shares
 

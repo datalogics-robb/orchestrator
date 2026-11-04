@@ -194,6 +194,27 @@ requires `web.auth`, which names where the operator's token lives; browsers log 
 `web.tls` serves HTTPS. The design, including the control tabs still to come, is in
 [`docs/web-monitor-design.md`](docs/web-monitor-design.md).
 
+## Builds on other platforms
+
+Some bugs only reproduce on one platform. `run --platform linux-armv8 KEY` pins the run's tasks to
+a build machine of that platform under `platforms:`. Their setup, build, red check, and tests run
+there over ssh, while the agents, pre-commit, commit, review, and PR stay on this host. Before
+each gate the worktree's changes since the last sync are sent, and build output is rewritten to
+local paths so agents can open the files it names. Without `--platform` nothing is contacted.
+
+```bash
+bin/orchestrator nodes check            # connect to each machine and report what it has (read-only)
+bin/orchestrator nodes install          # copy the node script to <root>/node.py on each machine
+bin/orchestrator run --platform linux-armv8 --dry-run APDFL-1234
+bin/orchestrator nodes clean --older-than 7d
+```
+
+Each machine needs ssh access with a host key already in `known_hosts`, Python 3, and git. With
+`checkout:` set, task directories start as git worktrees of that clone, so the first sync sends
+only the task's changes. `max_concurrent_builds` limits the orchestrator's commands per machine.
+The design and its current status are in
+[`docs/remote-builds-design.md`](docs/remote-builds-design.md).
+
 ## Configuration
 
 One YAML file per target repository; `orchestrator init` writes a commented example.

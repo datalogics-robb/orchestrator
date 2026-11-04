@@ -86,6 +86,74 @@ def _build_env(rt: Runtime, task: TaskState, wt_path: Path) -> dict[str, str]:
     return build_env(extra=extra, prepend_path=prepend)
 
 
+async def run_gate(
+    rt: Runtime,
+    task: TaskState,
+    wt: Worktree,
+    name: str,
+    commands: list[list[str]],
+    *,
+    timeout_seconds: int,
+    serialize: bool = False,
+) -> StepResult:
+    """A setup, build, red-check, or test step: on the task's build machine when it is pinned, else locally."""
+    log_dir = rt.task_dir(task.key) / "logs"
+    if task.node:
+        return await rt.remote.run_step(
+            rt, task, wt, name, commands, timeout_seconds=timeout_seconds, log_dir=log_dir
+        )
+    return await run_step(
+        name,
+        commands,
+        cwd=wt.path,
+        env=lambda: _build_env(rt, task, wt.path),
+        timeout_seconds=timeout_seconds,
+        log_dir=log_dir,
+        serialize=serialize,
+    )
+
+
+async def _setup_on_machine(rt: Runtime, task: TaskState, wt: Worktree) -> None:
+    """Pin the task to a machine of its platform, prepare its directory there, and run the setup steps."""
+    assert task.platform
+    machine = None
+    if task.node:
+        node = rt.remote.platform(task.platform).node(task.node)
+        machine = rt.remote.machine(task) if node else None
+    if machine is None:
+        machine, info = await rt.remote.pick(task.platform)
+        task.node = machine.host
+        rt.audit.record(
+            "pinned",
+            task.key,
+            platform=task.platform,
+            machine=machine.host,
+            trigger=task.platform_trigger,
+            arch=info.get("arch"),
+            node_version=info.get("version"),
+        )
+        rt.store.save_task(rt.run_id, task)
+    rt.event(task.key, task.state, f"on {task.platform} ({task.node})")
+    await rt.remote.prepare(rt, task)
+    timeout = rt.cfg.build.timeout_minutes * 60
+    if rt.cfg.build.local_setup:
+        step = await run_step(
+            "local-setup",
+            rt.cfg.build.local_setup,
+            cwd=wt.path,
+            env=lambda: _build_env(rt, task, wt.path),
+            timeout_seconds=timeout,
+            log_dir=rt.task_dir(task.key) / "logs",
+            serialize=True,
+        )
+        if not step.ok:
+            raise Failed(f"build.local_setup failed:\n{step.failure_excerpt()}")
+    if rt.cfg.build.setup:
+        step = await run_gate(rt, task, wt, "setup", rt.cfg.build.setup, timeout_seconds=timeout)
+        if not step.ok:
+            raise Failed(f"build.setup failed on {task.node}:\n{step.failure_excerpt()}")
+
+
 def _limits(rt: Runtime, role: Role) -> Limits:
     rc = rt.cfg.agents.role(role)
     return Limits(
@@ -364,7 +432,11 @@ async def stage_worktree(rt: Runtime, spec: TaskSpec, task: TaskState) -> State:
     if src.exists():
         shutil.copytree(src, dst, dirs_exist_ok=True)
     env = lambda: _build_env(rt, task, wt.path)  # noqa: E731 - venv appears after setup
-    if rt.cfg.build.setup:
+    if task.platform is None and rt.platform and rt.platform != "local":
+        task.platform, task.platform_trigger = rt.platform, "operator"
+    if task.platform:
+        await _setup_on_machine(rt, task, wt)
+    elif rt.cfg.build.setup:
         step = await run_step(
             "setup",
             rt.cfg.build.setup,
@@ -421,6 +493,7 @@ def _prompt_common(rt: Runtime, spec: TaskSpec, task: TaskState, wt: Worktree, r
         "spec_md": spec_markdown(task, with_review=False) if task.spec else "",
         "decisions": task.decisions,
         "interrupted": task.interrupted or "",
+        "platform": task.platform if task.platform and task.platform != "local" else "",
     }
 
 
@@ -512,13 +585,13 @@ async def stage_build(rt: Runtime, spec: TaskSpec, task: TaskState) -> State:
     wt = _worktree(rt, task)
     if not rt.cfg.build.commands:
         return "TESTING"
-    step = await run_step(
+    step = await run_gate(
+        rt,
+        task,
+        wt,
         f"build-r{task.round}",
         rt.cfg.build.commands,
-        cwd=wt.path,
-        env=_build_env(rt, task, wt.path),
         timeout_seconds=rt.cfg.build.timeout_minutes * 60,
-        log_dir=rt.task_dir(task.key) / "logs",
         serialize=True,
     )
     rt.audit.record("build", task.key, ok=step.ok, round=task.round)
@@ -544,13 +617,8 @@ async def stage_test(rt: Runtime, spec: TaskSpec, task: TaskState) -> State:
     if not commands:
         rt.audit.record("tests", task.key, ok=True, commands=[], note="no tests selected")
         return "COMMITTING"
-    step: StepResult = await run_step(
-        f"test-r{task.round}",
-        commands,
-        cwd=wt.path,
-        env=_build_env(rt, task, wt.path),
-        timeout_seconds=rt.cfg.test.timeout_minutes * 60,
-        log_dir=rt.task_dir(task.key) / "logs",
+    step: StepResult = await run_gate(
+        rt, task, wt, f"test-r{task.round}", commands, timeout_seconds=rt.cfg.test.timeout_minutes * 60
     )
     rt.audit.record("tests", task.key, ok=step.ok, commands=commands, round=task.round)
     if step.ok:

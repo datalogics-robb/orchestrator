@@ -46,6 +46,8 @@ build:
   setup:
     - python3 mkenv.py                   # creates the worktree's own venv with invoke, conan, cmake
     - invoke -e bootstrap -u --config=Release
+  local_setup:                           # a task on a build machine still needs the local venv pre-commit uses
+    - python3 mkenv.py
   commands:
     - invoke -e build --config=Release
   timeout_minutes: 180
@@ -120,3 +122,19 @@ workflows:
     review_rounds: 18
     spec_revisions: 2
     max_cost_usd: 500
+
+# Build machines for `run --platform linux-armv8`: setup, build, red check, and tests run there over
+# ssh while the agents stay on this host. They are also the apdfl-armv8-rocky9 Jenkins agents, so
+# the orchestrator runs one command at a time on each. The login is the shared engineering account.
+platforms:
+  linux-armv8:
+    aliases: [aarch64, arm64, armv8, "linux arm", "arm linux"]
+    ssh:
+      user: rocky
+      identity_file: ~/.ssh/engineering-dl.pem
+    root: /home/rocky/robb/orchestrator
+    checkout: /home/rocky/robb/pdfl18_all    # a clone of the fork; base commits are fetched by URL
+    max_concurrent_builds: 1
+    nodes:
+      - host: 10.200.0.78
+      - host: 10.200.0.224
