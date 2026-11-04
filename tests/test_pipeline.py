@@ -149,7 +149,7 @@ async def test_build_failure_triggers_fix_round(config_path: Path, config_dict: 
 
     flag = tmp_path / "pass.flag"
     config_dict["build"]["commands"] = [
-        f"python3 -c \"import sys,os; sys.exit(0 if os.path.exists('{flag}') else 1)\""
+        f"{fakes.PYQ} -c \"import sys,os; sys.exit(0 if os.path.exists('{flag.as_posix()}') else 1)\""
     ]
     config_path.write_text(yaml.safe_dump(config_dict))
     # first worker call leaves the build failing; the fix round creates the flag
@@ -339,7 +339,7 @@ async def test_deletion_only_change_is_committed(config_path: Path) -> None:
             "status": "completed",
             "summary": "Removed the stale README.",
             "changed_paths": ["README.md"],
-            "tests_selected": ["python3 -c pass"],
+            "tests_selected": [f"{fakes.PYQ} -c pass"],
             "test_rationale": "nothing to run",
         }
     )
@@ -377,13 +377,13 @@ async def test_dependency_cycle_blocks_its_members_instead_of_hanging(config_pat
 def _feature_config(config_dict: dict, config_path: Path, **feature: object) -> None:
     import yaml
 
-    config_dict["test"]["selection"] = {"strategy": "agent-chosen", "allowed_prefixes": ["python3"]}
+    config_dict["test"]["selection"] = {"strategy": "agent-chosen", "allowed_prefixes": [fakes.PYQ]}
     config_dict["workflows"] = {"feature": feature} if feature else {}
     config_path.write_text(yaml.safe_dump(config_dict))
 
 
 def _failing_until(flag: Path) -> str:
-    return f"python3 -c \"import os, sys; sys.exit(0 if os.path.exists('{flag}') else 1)\""
+    return f"{fakes.PYQ} -c \"import os, sys; sys.exit(0 if os.path.exists('{flag.as_posix()}') else 1)\""
 
 
 SPEC = {
@@ -424,7 +424,7 @@ async def test_feature_workflow_pauses_for_approval_then_goes_red_then_green(
                 "status": "completed",
                 "summary": "Implemented frob.",
                 "changed_paths": ["agent_change.txt"],
-                "tests_selected": ["python3 -c pass"],
+                "tests_selected": [f"{fakes.PYQ} -c pass"],
                 "test_rationale": "red tests plus the converter group",
             },
         ]
@@ -482,8 +482,8 @@ async def test_feature_workflow_pauses_for_approval_then_goes_red_then_green(
     assert task.phase_commits == [red_sha] and task.commit_sha == green_sha
     assert "exit 1" in task.red_evidence or red_cmd.split()[0] in task.red_evidence
     # the red tests ran again in the green check, ahead of what the worker listed
-    assert task.tests_run[0][0] == "python3" and "os.path.exists" in " ".join(task.tests_run[0])
-    assert ["python3", "-c", "pass"] in task.tests_run
+    assert task.tests_run[0][0] == fakes.PY and "os.path.exists" in " ".join(task.tests_run[0])
+    assert [fakes.PY, "-c", "pass"] in task.tests_run
     red_req, green_req = fakes.CALLS["worker"][1], fakes.CALLS["worker"][2]
     assert (
         "tests only" in red_req.prompt
@@ -515,12 +515,14 @@ async def test_feature_red_check_rejects_passing_and_resource_failures(
     fakes.SCRIPT["worker"].extend(
         [
             SPEC,
-            {**base, "_write": "t1", "summary": "tests", "tests_selected": ["python3 -c pass"]},
+            {**base, "_write": "t1", "summary": "tests", "tests_selected": [f"{fakes.PYQ} -c pass"]},
             {
                 **base,
                 "_write": "t2",
                 "summary": "tests",
-                "tests_selected": ["python3 -c \"import sys; print('ResourceProblem 55'); sys.exit(1)\""],
+                "tests_selected": [
+                    f"{fakes.PYQ} -c \"import sys; print('ResourceProblem 55'); sys.exit(1)\""
+                ],
             },
             {**base, "_write": "t3", "summary": "tests", "tests_selected": [red_cmd]},
             {**base, "_touch": str(flag), "_write": "impl", "summary": "implemented", "tests_selected": []},

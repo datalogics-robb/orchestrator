@@ -3,12 +3,20 @@
 from __future__ import annotations
 
 import json
+import shlex
+import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 from orchestrator.agents.base import AgentRequest, AgentResult, Capabilities, Problem
 from orchestrator.config.schema import RoleConfig
 from orchestrator.trackers.base import Attachment, Issue
+
+# The interpreter running the tests, for build and test commands: `python3` is not a real
+# program on Windows. Forward slashes, because command strings are split shell-style.
+PY = Path(sys.executable).as_posix()
+PYQ = shlex.quote(PY)
 
 FULL = Capabilities(True, True, True, True, True, True, True, True)
 NONE = Capabilities(False, False, False, False, False, False, False, False)
@@ -39,9 +47,12 @@ def default_worker_output(request: AgentRequest) -> dict:
         dst = next(g for g in grants if g["mode"] == "read-write")
         sample = Path(src["path"]) / "cases" / "SF1" / "input.pdf"
         if sample.exists():
+            # found on the agent's PATH the way its shell would: orchestrator-cp.cmd on Windows
+            helper = shutil.which("orchestrator-cp", path=request.env.get("PATH"))
+            assert helper, "orchestrator-cp is not on the agent's PATH"
             proc = subprocess.run(
                 [
-                    "orchestrator-cp",
+                    helper,
                     f"{src['name']}:cases/SF1/input.pdf",
                     f"{dst['name']}:agent-drops/SF1/input.pdf",
                 ],
@@ -60,7 +71,7 @@ def default_worker_output(request: AgentRequest) -> dict:
         "status": "completed",
         "summary": "Added agent_change.txt as asked.",
         "changed_paths": ["agent_change.txt"],
-        "tests_selected": ["python3 -c pass"],
+        "tests_selected": [f"{PYQ} -c pass"],
         "test_rationale": "smoke",
         "copied_files": copied,
     }

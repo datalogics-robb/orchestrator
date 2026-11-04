@@ -8,11 +8,12 @@ from pydantic import ValidationError
 
 from orchestrator.config.loader import ConfigError, SecretError, load_config, scan_for_secrets
 from orchestrator.config.schema import Config
+from tests import fakes
 
 
 def test_loads_and_splits_commands(config_dict: dict, tmp_path: Path) -> None:
     cfg = Config.model_validate(config_dict)
-    assert cfg.build.commands == [["python3", "-c", "pass"]]
+    assert cfg.build.commands == [[fakes.PY, "-c", "pass"]]
     assert cfg.shares["raid"].path_for("darwin") == Path(config_dict["shares"]["raid"]["paths"]["darwin"])
     assert cfg.runs_dir == tmp_path / "state" / "runs"
 

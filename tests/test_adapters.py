@@ -58,16 +58,19 @@ def test_claude_worker_argv(tmp_path: Path) -> None:
     assert argv[argv.index("--max-budget-usd") + 1] == "2.5"
     assert argv[argv.index("--effort") + 1] == "high"
     add_dirs = [argv[i + 1] for i, a in enumerate(argv) if a == "--add-dir"]
-    assert add_dirs == [str(req.cwd), "/Volumes/support", "/Volumes/raid"]
+    assert add_dirs == [str(req.cwd), str(Path("/Volumes/support")), str(Path("/Volumes/raid"))]
     assert "--strict-mcp-config" in argv
     assert argv[argv.index("--disallowedTools") + 1] == "mcp__mcp-jenkins__triggerBuild"
     assert json.loads(argv[argv.index("--json-schema") + 1]) == WORKER_SCHEMA
     settings = json.loads((home / "settings.json").read_text())
     hook_cmd = settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
-    assert hook_cmd.endswith("hook-rules.json") and "claude_pretool.py" in hook_cmd
+    assert hook_cmd.rstrip("'\"").endswith("hook-rules.json") and "claude_pretool.py" in hook_cmd
     rules = json.loads((home / "hook-rules.json").read_text())
-    assert "/Volumes/support" in rules["read_only_paths"]
-    assert "/Volumes/raid/agent-drops" in rules["write_roots"] and str(req.cwd) in rules["write_roots"]
+    assert str(Path("/Volumes/support")) in rules["read_only_paths"]
+    assert (
+        str(Path("/Volumes/raid/agent-drops")) in rules["write_roots"]
+        and str(req.cwd) in rules["write_roots"]
+    )
     assert json.loads((home / "mcp.json").read_text()) == {"mcpServers": req.mcp_servers}
 
 
@@ -102,7 +105,7 @@ def test_codex_worker_gets_writable_shares_and_resume(tmp_path: Path) -> None:
     home.mkdir()
     argv = CodexRunner().argv(req, home)
     assert argv[argv.index("--sandbox") + 1] == "workspace-write"
-    assert argv[argv.index("--add-dir") + 1] == "/Volumes/raid"
+    assert argv[argv.index("--add-dir") + 1] == str(Path("/Volumes/raid"))
     assert "--ephemeral" not in argv
     req.session = "thread-1"
     argv = CodexRunner().argv(req, home)

@@ -11,6 +11,7 @@ import gzip
 import io
 import json
 import subprocess
+import sys
 import tarfile
 from pathlib import Path
 
@@ -26,6 +27,17 @@ from orchestrator.remote import delta
 from orchestrator.remote.builds import RemoteBuilds
 from orchestrator.remote.client import DirectTransport, Machine, NodeClient, NodeError, SshTransport
 from tests import fakes
+
+# DirectTransport runs the node script here in place of the build machine, which is POSIX: the
+# script uses process groups, signals, and symlinks, so those tests run only on a POSIX host.
+posix_node = pytest.mark.skipif(
+    sys.platform == "win32", reason="the node script runs on a POSIX build machine, not here"
+)
+
+
+def _root(tmp_path: Path) -> str:
+    """The machine root: local for DirectTransport on POSIX; on Windows only validated, never used."""
+    return "/machine-root" if sys.platform == "win32" else str(tmp_path / "machine-root")
 
 
 def _git(*args: str, cwd: Path) -> str:
@@ -44,7 +56,7 @@ def _platform(tmp_path: Path, checkout: Path | None, **extra: object) -> dict:
     return {
         "aliases": ["aarch64"],
         "ssh": {"user": "builder"},
-        "root": str(tmp_path / "machine-root"),
+        "root": _root(tmp_path),
         **({"checkout": str(checkout)} if checkout else {}),
         "env": {"REMOTE_FLAG": "on"},
         "nodes": [{"host": "arm-1"}],
@@ -76,7 +88,9 @@ def test_ssh_argv_checks_host_keys_and_quotes_the_remote_command(tmp_path: Path)
     m = Machine("armtest", cfg, cfg.nodes[0])
     argv = SshTransport().argv(m, ["python3", m.script, "run", "--", "echo", "a b; rm -rf /"])
     assert argv[0] == "ssh" and "StrictHostKeyChecking=yes" in argv and "BatchMode=yes" in argv
-    assert "UserKnownHostsFile=/etc/kh" in argv and argv[argv.index("-i") + 1].endswith("/.ssh/k.pem")
+    # local paths, so in the host's own spelling
+    assert f"UserKnownHostsFile={Path('/etc/kh')}" in argv
+    assert Path(argv[argv.index("-i") + 1]).parts[-2:] == (".ssh", "k.pem")
     assert argv[-3:-1] == ["rocky@arm-1", "--"]
     assert argv[-1].endswith("echo 'a b; rm -rf /'")
 
@@ -92,6 +106,7 @@ async def _sync(client: NodeClient, wt: Path, index: Path, old: str, base: str |
     return new
 
 
+@posix_node
 async def test_prepare_from_checkout_then_sync_only_the_delta(
     git_repo: tuple[Path, Path], machine_checkout: Path, tmp_path: Path
 ) -> None:
@@ -131,6 +146,7 @@ async def test_prepare_from_checkout_then_sync_only_the_delta(
     assert not src.exists() and str(src) not in _git("worktree", "list", cwd=machine_checkout)
 
 
+@posix_node
 async def test_prepare_fetches_a_missing_base_commit(
     git_repo: tuple[Path, Path], machine_checkout: Path, tmp_path: Path
 ) -> None:
@@ -172,6 +188,7 @@ def _payload(path: Path, members: list[tarfile.TarInfo], delete: list[str] | Non
         ("dev", tarfile.CHRTYPE, "", None),
     ],
 )
+@posix_node
 async def test_sync_refuses_paths_that_leave_the_source(
     tmp_path: Path, name: str, kind: bytes, link: str, delete: list[str] | None
 ) -> None:
@@ -185,6 +202,7 @@ async def test_sync_refuses_paths_that_leave_the_source(
     assert not (tmp_path / "machine-root" / "r1" / "escape.txt").exists()
 
 
+@posix_node
 async def test_run_streams_output_and_exit_code_with_the_platform_env(tmp_path: Path) -> None:
     client = NodeClient(_machine(tmp_path, None), DirectTransport())
     await client.prepare("r1", "PROJ-1", "abcdef1", "unused", "develop")
@@ -196,6 +214,7 @@ async def test_run_streams_output_and_exit_code_with_the_platform_env(tmp_path: 
     assert missing.exit_code == 127 and "command not found" in missing.stderr
 
 
+@posix_node
 async def test_a_timeout_kills_the_job_on_the_machine(tmp_path: Path) -> None:
     client = NodeClient(_machine(tmp_path, None), DirectTransport())
     await client.prepare("r1", "PROJ-1", "abcdef1", "unused", "develop")
@@ -219,10 +238,10 @@ def _remote_config(
     raw["build"] = {
         **raw["build"],
         "local_setup": raw["build"]["setup"],  # the fake pre-commit venv the host's commit gate needs
-        "setup": ["python3 -c \"open('remote-setup-ran', 'w').write('yes')\""]
+        "setup": [f"{fakes.PYQ} -c \"open('remote-setup-ran', 'w').write('yes')\""]
         if needs_flag
         else raw["build"]["setup"],  # a local task runs only setup, which must cover local_setup
-        "commands": [f'python3 -c "{flag_check}"'],
+        "commands": [f'{fakes.PYQ} -c "{flag_check}"'],
     }
     raw["platforms"] = {"armtest": _platform(tmp_path, checkout)}
     path = tmp_path / "remote.yaml"
@@ -242,6 +261,7 @@ async def _remote_run(path: Path, keys: list[str], *, platform: str | None, dry_
 
 
 @pytest.mark.usefixtures("fake_runners")
+@posix_node
 async def test_a_pinned_task_runs_its_gates_on_the_machine(
     config_dict: dict, machine_checkout: Path, tmp_path: Path
 ) -> None:
@@ -261,11 +281,12 @@ async def test_a_pinned_task_runs_its_gates_on_the_machine(
     commands = [e for e in events if e["event"] == "remote_command"]
     assert {e["machine"] for e in commands} == {"arm-1"} and all(e["exit_code"] == 0 for e in commands)
     assert any("REMOTE_FLAG" in " ".join(e["argv"]) for e in commands)  # the build
-    assert any(e["argv"] == ["python3", "-c", "pass"] for e in commands)  # the selected test
+    assert any(e["argv"] == [fakes.PY, "-c", "pass"] for e in commands)  # the selected test
     assert src.exists()  # a dry run keeps the machine's directory, like its worktree
 
 
 @pytest.mark.usefixtures("fake_runners")
+@posix_node
 async def test_a_done_task_cleans_its_machine_directory(
     config_dict: dict, machine_checkout: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -279,6 +300,7 @@ async def test_a_done_task_cleans_its_machine_directory(
 
 
 @pytest.mark.usefixtures("fake_runners")
+@posix_node
 async def test_a_failing_remote_build_becomes_a_fix_round_with_local_paths(
     config_dict: dict, tmp_path: Path
 ) -> None:
@@ -294,7 +316,7 @@ async def test_a_failing_remote_build_becomes_a_fix_round_with_local_paths(
         "status": "completed",
         "summary": "Changed agent_change.txt.",
         "changed_paths": ["agent_change.txt"],
-        "tests_selected": ["python3 -c pass"],
+        "tests_selected": [f"{fakes.PYQ} -c pass"],
         "test_rationale": "smoke",
         "copied_files": [],
     }
@@ -322,6 +344,7 @@ async def test_without_a_platform_nothing_is_contacted(config_dict: dict, tmp_pa
 
 
 @pytest.mark.usefixtures("fake_runners")
+@posix_node
 async def test_an_unreachable_platform_fails_the_task(config_dict: dict, tmp_path: Path) -> None:
     raw = yaml.safe_load(_remote_config(config_dict, tmp_path, tmp_path / "no-such-checkout").read_text())
     path = tmp_path / "remote.yaml"

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -68,9 +69,10 @@ def test_posix_leaves_argv_alone(tmp_path: Path) -> None:
 
 def test_npm_shim_runs_its_script_with_node_from_path(tmp_path: Path) -> None:
     shim = _npm_prefix(tmp_path, MODERN_SHIM, r"node_modules\@anthropic-ai\claude-code\cli.js")
-    node = _executable(tmp_path / "nodejs" / "node")
+    node = _executable(tmp_path / "nodejs" / ("node.exe" if sys.platform == "win32" else "node"))
     wrapped = oscompat.unwrap_npm_shim(shim, path=str(node.parent))
-    assert wrapped == [str(node), str(shim.parent / "node_modules/@anthropic-ai/claude-code/cli.js")]
+    expected = [str(node), str(shim.parent / "node_modules/@anthropic-ai/claude-code/cli.js")]
+    assert wrapped and [os.path.normcase(w) for w in wrapped] == [os.path.normcase(e) for e in expected]
 
 
 def test_npm_shim_prefers_the_node_beside_it(tmp_path: Path) -> None:
@@ -160,6 +162,7 @@ def test_agent_env_keeps_what_windows_programs_need(monkeypatch: pytest.MonkeyPa
 def test_hook_command_quotes_paths_with_spaces(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     script = tmp_path / "my hooks" / "claude_pretool.py"
     rules = tmp_path / "run dir" / "hook-rules.json"
+    monkeypatch.setattr(sys, "platform", "linux")
     posix = hook_command(script, rules)
     assert f"'{script}'" in posix and f"'{rules}'" in posix
     monkeypatch.setattr(sys, "platform", "win32")

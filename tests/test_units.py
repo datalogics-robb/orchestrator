@@ -264,7 +264,7 @@ def test_adf_to_markdown() -> None:
 
 def test_build_env_scrubs() -> None:
     base = {
-        "PATH": "/usr/bin:/bin",
+        "PATH": os.pathsep.join(["/usr/bin", "/bin"]),
         "HOME": "/h",
         "GITHUB_TOKEN": "x",
         "VIRTUAL_ENV": "/v",
@@ -280,7 +280,7 @@ def test_build_env_scrubs() -> None:
     assert "GITHUB_TOKEN" not in env and "VIRTUAL_ENV" not in env and "PYTHONPATH" not in env
     assert "PYTHONWARNINGS" not in env and env["PIP_CACHE_DIR"] == "/c"
     assert env["ANTHROPIC_API_KEY"] == "k" and env["CC"] == "clang"
-    assert env["PATH"].startswith("/tools:")
+    assert env["PATH"].startswith(str(Path("/tools")) + os.pathsep)
 
 
 def test_redactor() -> None:
@@ -390,7 +390,10 @@ def test_cp_refuses_destination_symlinks(tmp_path: Path, monkeypatch: pytest.Mon
     monkeypatch.delenv(cp.AUDIT_ENV, raising=False)
     # a file symlink inside the destination directory pointing outside the share
     (raid / "drops" / "bundle").mkdir()
-    (raid / "drops" / "bundle" / "a.txt").symlink_to(outside / "victim.txt")
+    try:
+        (raid / "drops" / "bundle" / "a.txt").symlink_to(outside / "victim.txt")
+    except OSError as e:  # Windows needs Developer Mode or an elevated token to create one
+        pytest.skip(f"cannot create symlinks here: {e}")
     assert cp.main(["support:bundle", "raid:drops/bundle"]) == 1
     assert (outside / "victim.txt").read_text() == "keep me"
     # a directory symlink inside the destination pointing outside the write roots
@@ -411,22 +414,63 @@ def test_cp_refuses_destination_symlinks(tmp_path: Path, monkeypatch: pytest.Mon
 # --- subprocesses --------------------------------------------------------------
 
 
-async def test_run_process_cancellation_kills_the_child(tmp_path: Path) -> None:
+def _alive(pid: int) -> bool:
+    """Whether a process exists, without signalling it (os.kill on Windows terminates)."""
+    if sys.platform == "win32":
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return False
+        try:
+            code = ctypes.c_ulong()
+            kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
+            return code.value == 259  # STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+# The child starts a grandchild, then publishes both pids; cancelling must stop the whole tree.
+_TREE_SCRIPT = """
+import os, subprocess, sys, time
+grandchild = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+with open(sys.argv[1] + ".tmp", "w", encoding="utf-8") as fh:
+    fh.write(f"{os.getpid()} {grandchild.pid}")
+os.replace(sys.argv[1] + ".tmp", sys.argv[1])
+time.sleep(60)
+"""
+
+
+async def test_run_process_cancellation_kills_the_process_tree(tmp_path: Path) -> None:
     import asyncio
+    import time
 
     from orchestrator.agents.base import run_process
 
-    pid_file = tmp_path / "pid"
-    argv = ["sh", "-c", f"echo $$ > {pid_file}; exec sleep 30"]
+    pid_file = tmp_path / "pids"
+    argv = [sys.executable, "-c", _TREE_SCRIPT, str(pid_file)]
     task = asyncio.ensure_future(run_process(argv, cwd=tmp_path, env=dict(os.environ), timeout=60))
-    while not pid_file.exists() or not pid_file.read_text().strip():
+    deadline = time.monotonic() + 30
+    while not pid_file.exists():
+        assert not task.done(), "the child exited before publishing its pids"
+        assert time.monotonic() < deadline, "the child never published its pids"
         await asyncio.sleep(0.02)
-    pid = int(pid_file.read_text())
+    pids = [int(p) for p in pid_file.read_text(encoding="utf-8").split()]
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
-    with pytest.raises(ProcessLookupError):
-        os.kill(pid, 0)
+    deadline = time.monotonic() + 5  # an orphaned grandchild is reaped by init, not instantly
+    while any(_alive(p) for p in pids) and time.monotonic() < deadline:
+        await asyncio.sleep(0.05)
+    assert not [p for p in pids if _alive(p)]
 
 
 # --- mcp passthrough ---------------------------------------------------------

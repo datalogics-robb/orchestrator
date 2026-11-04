@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -14,26 +15,63 @@ def _git(*args: str, cwd: Path) -> None:
     subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
 
 
-FAKE_PRECOMMIT_SCRIPT = """#!/bin/sh
-mkdir -p .orchestrator
-echo "$*" >> .orchestrator/precommit.log
-if [ "$1" = install ]; then
-  hooks=$(git rev-parse --git-path hooks); mkdir -p "$hooks"
-  printf '#!/bin/sh\\ncommand -v pre-commit >/dev/null || { echo "pre-commit not on PATH in git hook"; exit 1; }\\nexec pre-commit run --hook-stage commit\\n' > "$hooks/pre-commit"
-  chmod +x "$hooks/pre-commit"
-fi
-if [ "$1" = run ] && [ -e precommit-fail ]; then echo "fake-hook.....Failed"; exit 1; fi
-exit 0
+# The fake pre-commit: logs its invocations, `install` writes a git hook that calls it back
+# through PATH, and `run` fails while a precommit-fail marker exists in the worktree.
+FAKE_PRECOMMIT_SCRIPT = """
+import os, subprocess, sys
+from pathlib import Path
+
+Path(".orchestrator").mkdir(exist_ok=True)
+with open(".orchestrator/precommit.log", "a", encoding="utf-8") as fh:
+    fh.write(" ".join(sys.argv[1:]) + "\\n")
+if sys.argv[1:2] == ["install"]:
+    out = subprocess.run(["git", "rev-parse", "--git-path", "hooks"], capture_output=True, check=True)
+    hooks = Path(out.stdout.decode().strip())
+    hooks.mkdir(parents=True, exist_ok=True)
+    hook = hooks / "pre-commit"
+    hook.write_bytes(
+        b"#!/bin/sh\\n"
+        b'command -v pre-commit >/dev/null || { echo "pre-commit not on PATH in git hook"; exit 1; }\\n'
+        b"exec pre-commit run --hook-stage commit\\n"
+    )
+    hook.chmod(0o755)
+if sys.argv[1:2] == ["run"] and os.path.exists("precommit-fail"):
+    print("fake-hook.....Failed")
+    sys.exit(1)
+"""
+
+# Stands in for mkenv: a fake worktree venv holding the fake pre-commit and a python stub. The
+# extension-less sh wrapper is what git's hook (run by sh, Git Bash on Windows) finds on PATH;
+# Windows also gets a .cmd, which is what shutil.which finds there.
+FAKE_VENV_SETUP = """
+import sys
+from pathlib import Path
+
+script = sys.argv[1]
+python = Path(sys.executable).as_posix()
+win = sys.platform == "win32"
+b = Path("python-env-fake") / ("Scripts" if win else "bin")
+b.mkdir(parents=True, exist_ok=True)
+sh = b / "pre-commit"
+sh.write_bytes(f'#!/bin/sh\\nexec "{python}" "{script}" "$@"\\n'.encode())
+sh.chmod(0o755)
+if win:
+    (b / "pre-commit.cmd").write_bytes(f'@"{python}" "{script}" %*\\r\\n'.encode())
+    (b / "python.exe").write_bytes(b"")
+else:
+    q = b / "python"
+    q.write_bytes(b"#!/bin/sh\\nexit 0\\n")
+    q.chmod(0o755)
 """
 
 
-def fake_precommit_setup(script_path: Path) -> str:
+def fake_precommit_setup(tmp_path: Path) -> str:
     """A build.setup command that plants the fake pre-commit (and a python stub) in a fake worktree venv."""
-    return (
-        "python3 -c \"import pathlib,shutil;b=pathlib.Path('python-env-fake/bin');b.mkdir(parents=True,exist_ok=True);"
-        f"p=b/'pre-commit';shutil.copy('{script_path}',p);p.chmod(0o755);"
-        "q=b/'python';q.write_text('#!/bin/sh\\nexit 0\\n');q.chmod(0o755)\""
-    )
+    script = tmp_path / "fake-pre-commit.py"
+    script.write_text(FAKE_PRECOMMIT_SCRIPT, encoding="utf-8")
+    setup = tmp_path / "fake-venv-setup.py"
+    setup.write_text(FAKE_VENV_SETUP, encoding="utf-8")
+    return f"{fakes.PYQ} {shlex.quote(setup.as_posix())} {shlex.quote(script.as_posix())}"
 
 
 @pytest.fixture
@@ -69,8 +107,6 @@ def shares(tmp_path: Path) -> tuple[Path, Path]:
 def config_dict(git_repo: tuple[Path, Path], shares: tuple[Path, Path], tmp_path: Path) -> dict:
     _, clone = git_repo
     support, raid = shares
-    fake_script = tmp_path / "fake-pre-commit"
-    fake_script.write_text(FAKE_PRECOMMIT_SCRIPT)
     return {
         "version": 1,
         "state_dir": str(tmp_path / "state"),
@@ -87,22 +123,23 @@ def config_dict(git_repo: tuple[Path, Path], shares: tuple[Path, Path], tmp_path
             "auth": {"token_env": "TEST_GITHUB_TOKEN"},
         },
         "shares": {
-            "support": {"paths": {"darwin": str(support), "linux": str(support)}},
-            "raid": {"paths": {"darwin": str(raid), "linux": str(raid)}, "write_under": ["agent-drops"]},
+            "support": {"paths": {"darwin": str(support), "linux": str(support), "windows": str(support)}},
+            "raid": {
+                "paths": {"darwin": str(raid), "linux": str(raid), "windows": str(raid)},
+                "write_under": ["agent-drops"],
+            },
         },
         "build": {
-            # setup stands in for mkenv: it creates a fake worktree venv holding a fake pre-commit that
-            # logs its invocations and fails `run` while a precommit-fail marker exists in the worktree
-            "setup": [fake_precommit_setup(fake_script)],
-            "commands": ["python3 -c pass"],
+            "setup": [fake_precommit_setup(tmp_path)],
+            "commands": [f"{fakes.PYQ} -c pass"],
             "timeout_minutes": 1,
         },
         "test": {
             "timeout_minutes": 1,
             "selection": {
                 "strategy": "changed-paths",
-                "map": {"agent_change": ["python3 -c pass"]},
-                "fallback": ["python3 -c pass"],
+                "map": {"agent_change": [f"{fakes.PYQ} -c pass"]},
+                "fallback": [f"{fakes.PYQ} -c pass"],
             },
         },
         "agents": {
