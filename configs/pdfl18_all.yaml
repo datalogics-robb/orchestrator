@@ -32,9 +32,9 @@ repo:
 
 shares:
   support:
-    paths: {darwin: /Volumes/support, linux: /support}
+    paths: {darwin: /Volumes/support, linux: /support, windows: "\\\\ivy\\support"}
   raid:
-    paths: {darwin: /Volumes/raid, linux: /raid}
+    paths: {darwin: /Volumes/raid, linux: /raid, windows: "\\\\ivy\\raid"}
     write_under:
       - development/Internal_Use/Testing/APDFL
 
