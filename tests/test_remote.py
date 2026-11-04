@@ -95,6 +95,33 @@ def test_ssh_argv_checks_host_keys_and_quotes_the_remote_command(tmp_path: Path)
     assert argv[-1].endswith("echo 'a b; rm -rf /'")
 
 
+# --- the sync payload ---------------------------------------------------------------------------
+
+
+async def test_sync_sends_what_a_posix_checkout_holds(git_repo: tuple[Path, Path], tmp_path: Path) -> None:
+    _, clone = git_repo
+    base = _git("rev-parse", "HEAD", cwd=clone)
+    # a Windows host: text checked out with CRLF
+    _git("config", "core.autocrlf", "true", cwd=clone)
+    (clone / ".gitattributes").write_bytes(b"* text=auto\n*.sln text eol=crlf\n")
+    (clone / "fix.h").write_bytes(b"#define A 1\r\n#define B \\\r\n  2\r\n")
+    (clone / "tool.sln").write_bytes(b"Project\r\nEndProject\r\n")
+    (clone / "data.bin").write_bytes(b"\x00\r\n\xff")
+    new = await delta.snapshot(clone, tmp_path / "index", base)
+    changes = await delta.changes(clone, f"{base}^{{tree}}", new)
+    out = tmp_path / "payload"
+    counts = delta.write_payload(clone, changes, out)
+    raw = out.read_bytes()
+    header, body = raw.split(b"\n", 1)
+    assert json.loads(header) == {"delete": []}
+    with tarfile.open(fileobj=io.BytesIO(gzip.decompress(body))) as tar:
+        sent = {m.name: tar.extractfile(m).read() for m in tar.getmembers()}  # type: ignore[union-attr]
+    assert sent["fix.h"] == b"#define A 1\n#define B \\\n  2\n"  # LF, as a Linux checkout has it
+    assert sent["tool.sln"] == b"Project\r\nEndProject\r\n"  # eol=crlf is kept everywhere
+    assert sent["data.bin"] == b"\x00\r\n\xff"  # binary is untouched
+    assert counts["bytes"] == sum(len(v) for v in sent.values())
+
+
 # --- the node script ----------------------------------------------------------------------------
 
 
@@ -330,6 +357,9 @@ async def test_a_failing_remote_build_becomes_a_fix_round_with_local_paths(
     assert "machine-root" not in fix_prompt
     # both the worker and the fixer are told their gates run on the platform, not here
     assert all("Target platform: armtest" in c.prompt for c in fakes.CALLS["worker"])
+    # and the reviewer is told the passing gates are the platform's results
+    review_prompt = fakes.CALLS["reviewer"][-1].prompt
+    assert "Tests the orchestrator ran on `armtest`" in review_prompt and task.node in review_prompt
 
 
 @pytest.mark.usefixtures("fake_runners")
@@ -340,6 +370,7 @@ async def test_without_a_platform_nothing_is_contacted(config_dict: dict, tmp_pa
         assert results[0].state == "DONE" and results[0].node is None
         assert not any(e["event"].startswith(("node_", "pinned", "remote_")) for e in events)
     assert not any("Target platform" in c.prompt for c in fakes.CALLS["worker"])
+    assert not any("build machine" in c.prompt for c in fakes.CALLS["reviewer"])
     assert not (tmp_path / "machine-root").exists()
 
 
@@ -353,7 +384,3 @@ async def test_an_unreachable_platform_fails_the_task(config_dict: dict, tmp_pat
     assert results[0].state == "FAILED"
     assert "no build machine for armtest is usable" in results[0].error
     assert "checkout" in results[0].error
-    # and the reviewer is told the passing gates are the platform's results
-    review_prompt = fakes.CALLS["reviewer"][-1].prompt
-    assert "Tests the orchestrator ran on `armtest`" in review_prompt and task.node in review_prompt
-    assert not any("build machine" in c.prompt for c in fakes.CALLS["reviewer"])
