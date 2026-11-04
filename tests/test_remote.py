@@ -353,3 +353,7 @@ async def test_an_unreachable_platform_fails_the_task(config_dict: dict, tmp_pat
     assert results[0].state == "FAILED"
     assert "no build machine for armtest is usable" in results[0].error
     assert "checkout" in results[0].error
+    # and the reviewer is told the passing gates are the platform's results
+    review_prompt = fakes.CALLS["reviewer"][-1].prompt
+    assert "Tests the orchestrator ran on `armtest`" in review_prompt and task.node in review_prompt
+    assert not any("build machine" in c.prompt for c in fakes.CALLS["reviewer"])

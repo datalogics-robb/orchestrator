@@ -33,7 +33,13 @@ If you believe the specification itself is incomplete or wrong, say so as a find
 
 Changed paths: {% for p in worker.changed_paths %}`{{ p }}`{% if not loop.last %}, {% endif %}{% else %}(none listed){% endfor %}
 
+{% if platform %}
+The orchestrator ran every gate on a `{{ platform }}` build machine{% if task.node %} (`{{ task.node }}`){% endif %}, not on the host the author works on: the setup, the build{% if build.commands %} ({% for c in build.commands %}`{{ c | join(' ') }}`{% if not loop.last %}, {% endif %}{% endfor %}){% endif %}, and the tests below. All of them passed there. The author can only build and test on the host, so where the author's report or test rationale says something could not be built or run on `{{ platform }}`, these gate results are the `{{ platform }}` evidence: do not ask for a `{{ platform }}` build or test run that is listed here.
+
+Tests the orchestrator ran on `{{ platform }}`, all passing:
+{% else %}
 Tests the orchestrator ran, all passing:
+{% endif %}
 {% for t in tests_run %}
 - `{{ t }}`
 {%- else %}
