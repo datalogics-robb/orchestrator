@@ -102,6 +102,42 @@ def test_windows_resolution_searches_the_child_path(tmp_path: Path) -> None:
     assert oscompat._resolve_windows(["nope.exe"], path=str(tmp_path), cwd=tmp_path) == ["nope.exe"]
 
 
+def _python(directory: Path, name: str = "python") -> Path:
+    return _executable(directory / (f"{name}.exe" if sys.platform == "win32" else name))
+
+
+def _norm(argv: list[str] | None) -> list[str] | None:
+    return None if argv is None else [os.path.normcase(a) for a in argv]
+
+
+def test_python3_finds_python_exe_and_skips_store_aliases(tmp_path: Path) -> None:
+    store = tmp_path / "Microsoft" / "WindowsApps"
+    _python(store, "python3")
+    _python(store)
+    real = _python(tmp_path / "Python314")
+    path = os.pathsep.join([str(store), str(real.parent)])
+    argv = oscompat._resolve_windows(["python3", "mkenv.py"], path=path, cwd=tmp_path)
+    assert _norm(argv) == _norm([str(real), "mkenv.py"])
+
+
+def test_python_lookup_keeps_path_order(tmp_path: Path) -> None:
+    venv = _python(tmp_path / "venv" / "Scripts")  # venvs on Windows have no python3.exe
+    system = _python(tmp_path / "Python314", "python3")
+    path = os.pathsep.join([str(venv.parent), str(system.parent)])
+    assert _norm(oscompat.find_python(path)) == _norm([str(venv)])
+
+
+def test_python_falls_back_to_the_launcher_then_the_store_alias(tmp_path: Path) -> None:
+    store = tmp_path / "Microsoft" / "WindowsApps"
+    alias = _python(store, "python3")
+    launcher = _python(tmp_path / "Windows", "py")
+    both = os.pathsep.join([str(store), str(launcher.parent)])
+    assert _norm(oscompat.find_python(both)) == _norm([str(launcher), "-3"])
+    assert _norm(oscompat.find_python(str(store))) == _norm([str(alias)])
+    assert oscompat.find_python(str(tmp_path / "empty")) is None
+    assert oscompat._resolve_windows(["python3", "x.py"], path="", cwd=tmp_path) == ["python3", "x.py"]
+
+
 def test_windows_resolution_unwraps_npm_shims(tmp_path: Path) -> None:
     shim = _npm_prefix(tmp_path, MODERN_SHIM, r"node_modules\@anthropic-ai\claude-code\cli.js")
     node = _executable(shim.parent / "node.exe")

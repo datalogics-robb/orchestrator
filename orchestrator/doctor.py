@@ -9,6 +9,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from orchestrator import oscompat
 from orchestrator.agents.base import LiveCheck, Problem
 from orchestrator.agents.registry import UnknownRunner, get_runner
 from orchestrator.config.loader import GH_TOKEN_COMMAND, SecretError, netrc_login, resolve_secret
@@ -217,11 +218,28 @@ def check_commands(cfg: Config) -> list[Check]:
         if not argv or argv[0] in seen:
             continue
         seen.add(argv[0])
-        if argv[0] in ("python", "python3", "pytest") or shutil.which(argv[0]):
+        if sys.platform == "win32" and argv[0].lower() in ("python", "python3"):
+            out.append(_check_windows_python(argv[0]))
+        elif argv[0] in ("python", "python3", "pytest") or shutil.which(argv[0]):
             out.append(Check("commands", "ok", f"{argv[0]} found"))
         else:
             out.append(Check("commands", "warn", f"{argv[0]} not on PATH (may come from the worktree venv)"))
     return out
+
+
+def _check_windows_python(name: str) -> Check:
+    """How a bare `python3`/`python` build command resolves on Windows (see `oscompat.find_python`)."""
+    python = oscompat.find_python(None)
+    if python is None:
+        return Check("commands", "fail", f"{name}: no Python on PATH and no py launcher")
+    if oscompat.is_store_alias(python[0]):
+        return Check(
+            "commands",
+            "warn",
+            f"{name} resolves only to the Microsoft Store alias {python[0]}, which is a stub unless "
+            "Python came from the Store; install Python from python.org",
+        )
+    return Check("commands", "ok", f"{name} runs {' '.join(python)}")
 
 
 async def check_remote(cfg: Config) -> list[Check]:

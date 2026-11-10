@@ -87,7 +87,7 @@ def resolve_argv(argv: list[str], *, path: str | None, cwd: Path) -> list[str]:
 
     Windows: CreateProcess searches the parent's PATH, adds only `.exe`, and resolves a relative
     program against the parent's cwd. So the program is looked up here on the child's PATH with
-    PATHEXT. An npm `.cmd` shim is replaced by the command it wraps, because cmd.exe re-parses
+    PATHEXT; a bare `python3` or `python` is found by `find_python`. An npm `.cmd` shim is replaced by the command it wraps, because cmd.exe re-parses
     every argument of a batch file; any other batch file runs only if no argument holds a
     character cmd.exe interprets (`BatchArgumentError` otherwise).
     """
@@ -96,8 +96,46 @@ def resolve_argv(argv: list[str], *, path: str | None, cwd: Path) -> list[str]:
     return _resolve_windows(argv, path=path, cwd=cwd)
 
 
+_PYTHON_NAMES = ("python3", "python")
+"""Bare program names that mean "a Python 3 interpreter" in a config written for every platform."""
+
+
+def is_store_alias(program: str) -> bool:
+    """Whether `program` is a Microsoft Store app execution alias in `...\\Microsoft\\WindowsApps`.
+
+    With no Store Python installed these are stubs that print "Python was not found" and exit.
+    """
+    return [p.lower() for p in Path(program).parent.parts[-2:]] == ["microsoft", "windowsapps"]
+
+
+def find_python(path: str | None) -> list[str] | None:
+    """The argv prefix that starts Python 3 on Windows, searching `path` (the child's PATH).
+
+    `python3` and `python` are equivalent: python.org installers and venvs provide only
+    `python.exe`. The first real interpreter in PATH order wins, so a venv on PATH is used; then
+    the `py -3` launcher; and a Store alias only when nothing else exists, since it is a stub
+    unless Python came from the Store.
+    """
+    dirs = [d for d in (path if path is not None else os.environ.get("PATH", "")).split(os.pathsep) if d]
+    aliases: list[str] = []
+    for d in dirs:
+        for name in _PYTHON_NAMES:
+            found = shutil.which(name, path=d)
+            if found and is_store_alias(found):
+                aliases.append(found)
+            elif found:
+                return [found]
+    launcher = shutil.which("py", path=os.pathsep.join(dirs))
+    if launcher and not is_store_alias(launcher):
+        return [launcher, "-3"]
+    return [aliases[0]] if aliases else None
+
+
 def _resolve_windows(argv: list[str], *, path: str | None, cwd: Path) -> list[str]:
     program = argv[0]
+    if program.lower() in _PYTHON_NAMES:
+        python = find_python(path)
+        return [*python, *argv[1:]] if python else argv
     if ("/" in program or "\\" in program) and not Path(program).is_absolute():
         program = str(cwd / program)
     found = shutil.which(program, path=path)
