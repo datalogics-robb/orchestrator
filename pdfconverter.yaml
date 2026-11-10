@@ -23,7 +23,7 @@ confluence:
   context_pages:                               # read-only reference for both agents
     - https://datalogics-jira.atlassian.net/wiki/spaces/EN/pages/9413880/Coding+standards
   publish:
-    space: ENG
+    space: EN
     parent_page_id: "9406301"
     when: [blocked, completed]
 
