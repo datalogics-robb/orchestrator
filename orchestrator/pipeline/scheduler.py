@@ -9,7 +9,7 @@ from collections.abc import Awaitable
 from orchestrator.intake.base import TaskSpec, cyclic_keys
 from orchestrator.pipeline import feature, stages
 from orchestrator.pipeline.runtime import Runtime
-from orchestrator.pipeline.task import TERMINAL, Blocked, Failed, TaskState, Workflow
+from orchestrator.pipeline.task import Blocked, Failed, TaskState, Workflow
 
 STAGES = {**stages.STAGES, **feature.STAGES}
 
@@ -18,9 +18,28 @@ def reopen(task: TaskState) -> None:
     """Put a FAILED or BLOCKED task back at the last stage it was in, so a resume continues from there."""
     if not task.terminal:
         return
-    previous = [s for _, s in task.history if s not in TERMINAL]
+    previous = task.stopped_at
     task.outcome, task.error, task.findings_path = "", None, None
-    task.transition(previous[-1] if previous else "CONTEXT")  # type: ignore[arg-type]
+    task.transition(previous or "CONTEXT")  # type: ignore[arg-type]
+
+
+def reopen_with_instruction(task: TaskState, instruction: str, by: str) -> None:
+    """Send a BLOCKED bugfix task back to the worker with the operator's instruction.
+
+    A task the worker blocked in WORKING goes back to WORKING. One that stopped later (fix rounds
+    used up, nothing to commit) goes to FIXING, keeping the last fix reason, so the worker acts on
+    the instruction before the gates run again. Either way the worker's session is resumed, and
+    every later worker prompt carries the instruction.
+    """
+    if task.state != "BLOCKED":
+        raise ValueError(f"{task.key} is {task.state}, not BLOCKED")
+    if task.workflow != "bugfix":
+        raise ValueError(f"{task.key} is a {task.workflow} task; only bugfix tasks take instructions")
+    task.say("instruction", instruction.strip(), by)
+    reopen(task)
+    if task.state != "WORKING":
+        task.fix_reason = task.fix_reason or "The operator reopened this task after it was blocked."
+        task.transition("FIXING")
 
 
 def reopen_for_retry(

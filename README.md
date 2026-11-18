@@ -175,6 +175,24 @@ stopped in, like `resume --retry-failed` and `--retry-blocked`. Runs started wit
 stopped they can be resumed there. Resuming or retrying a run that isn't a dry run asks for
 confirmation.
 
+Each task on the Agents tab has a **details** link (**why?** when it is blocked or failed), and
+so does each task in the Runs tab's Tasks column, for runs that have left the Agents tab. It
+opens a panel that says plainly where the task stands. For a task that ended without a PR, the
+panel shows the stage it stopped in and why, the worker's questions for the reporter, the findings
+report, the branch and worktree, and the cost. Once the run has stopped, the panel also has a
+message box for talking to the task's worker:
+
+- **Ask** sends a question. The worker answers from its own session, so it remembers what it did,
+  with read-only access to the worktree and shares. The task doesn't change. The run is held while
+  the worker answers, and the answer appears in the panel's conversation.
+- **Instruct and retry** (blocked bugfix tasks only) records your instruction, reopens just that
+  task, and resumes the run. A task the worker blocked goes back to the worker; one that ran out
+  of fix rounds or had nothing to commit goes back as a fix round. The worker's session continues
+  with your instruction, which every later worker prompt also carries. If the task then completes,
+  the usual build, tests, review, and PR follow.
+
+Questions and instructions are kept with the task and recorded in the run's audit log.
+
 **Shut down**, in the page header, stops the daemon just as `serve --stop` or SIGTERM does,
 after a confirmation that says how many runs it will interrupt. Stopping the daemon, by any of
 these, leaves the runs it was driving `interrupted`. With `web.resume_on_start: true`

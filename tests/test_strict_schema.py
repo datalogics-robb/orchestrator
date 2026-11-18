@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from orchestrator.agents.contracts import REVIEWER_SCHEMA, WORKER_SCHEMA, strict_schema
+from orchestrator.agents.contracts import ANSWER_SCHEMA, REVIEWER_SCHEMA, WORKER_SCHEMA, strict_schema
 
 
 def _objects(node: Any):
@@ -18,7 +18,7 @@ def _objects(node: Any):
 
 
 def test_strict_schema_meets_openai_rules() -> None:
-    for schema in (WORKER_SCHEMA, REVIEWER_SCHEMA):
+    for schema in (WORKER_SCHEMA, REVIEWER_SCHEMA, ANSWER_SCHEMA):
         strict = strict_schema(schema)
         objects = list(_objects(strict))
         assert objects, "no object schemas found"

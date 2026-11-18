@@ -92,6 +92,12 @@ class ReviewerResult(Contract):
         return [f for f in self.findings if f.spec_gap]
 
 
+class OperatorAnswer(Contract):
+    """The worker's reply to a question the operator asked about its task."""
+
+    answer: str
+
+
 def _schema(model: type[BaseModel]) -> dict[str, Any]:
     schema = model.model_json_schema(by_alias=True)
     # Inline $defs so every CLI's schema validator sees a self-contained object.
@@ -141,6 +147,7 @@ def strict_schema(schema: dict[str, Any]) -> dict[str, Any]:
 WORKER_SCHEMA: dict[str, Any] = _schema(WorkerResult)
 REVIEWER_SCHEMA: dict[str, Any] = _schema(ReviewerResult)
 SPEC_SCHEMA: dict[str, Any] = _schema(SpecResult)
+ANSWER_SCHEMA: dict[str, Any] = _schema(OperatorAnswer)
 
 
 class ContractError(Exception):

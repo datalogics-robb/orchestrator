@@ -99,6 +99,25 @@ class TaskState:
     epic_key: str | None = None
     history: list[tuple[str, str]] = field(default_factory=list)
     """(timestamp, state) transitions, for the run report."""
+    conversation: list[dict[str, str]] = field(default_factory=list)
+    """The operator's messages about this task and the worker's replies, oldest first. Each entry has
+    `ts`, `kind` (question, answer, instruction, or error), `text`, and `by` (the client, or the role)."""
+
+    def say(self, kind: Literal["question", "answer", "instruction", "error"], text: str, by: str) -> None:
+        self.conversation.append({"ts": now(), "kind": kind, "text": text, "by": by})
+
+    @property
+    def instructions(self) -> list[str]:
+        """What the operator told the worker to do, oldest first; every later worker prompt carries them."""
+        return [m["text"] for m in self.conversation if m["kind"] == "instruction"]
+
+    @property
+    def stopped_at(self) -> str | None:
+        """The last stage a terminal task was in before it ended; None while it is still going."""
+        if not self.terminal:
+            return None
+        previous = [s for _, s in self.history if s not in TERMINAL]
+        return previous[-1] if previous else None
 
     def transition(self, state: State) -> None:
         self.state = state

@@ -32,7 +32,14 @@ from orchestrator.config.schema import Config, WebConfig
 from orchestrator.reporting.audit import Redactor
 from orchestrator.state.store import Store, this_process
 from orchestrator.web.runs import ControlError, RunManager
-from orchestrator.web.status import AgentsResponse, DaemonInfo, RunsResponse, agent_rows, run_views
+from orchestrator.web.status import (
+    AgentsResponse,
+    DaemonInfo,
+    RunsResponse,
+    agent_rows,
+    run_views,
+    task_detail,
+)
 
 STATIC_DIR = Path(__file__).parent / "static"
 OPERATOR = "operator"
@@ -81,6 +88,22 @@ class ResumeRequest(BaseModel):
 
     retry_failed: bool = Field(False, description="Also re-run FAILED tasks from the stage they failed in.")
     retry_blocked: bool = Field(False, description="Also re-run BLOCKED tasks from the stage they were in.")
+
+
+class AskRequest(BaseModel):
+    """`POST /api/runs/{run_id}/tasks/{key}/ask`: a question for the task's worker, answered read-only."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    question: str = Field(min_length=1, max_length=20_000)
+
+
+class InstructRequest(BaseModel):
+    """`POST /api/runs/{run_id}/tasks/{key}/instruct`: send a blocked task back to its worker."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    instruction: str = Field(min_length=1, max_length=20_000)
 
 
 def host_name(header: str) -> str:
@@ -215,6 +238,29 @@ def create_app(
                 retry_blocked=body.retry_blocked,
                 client=client_of(request),
             )
+        except ControlError as e:
+            return refused(e)
+        return JSONResponse(redactor.redact_obj({**vars(resumed), "status": "queued"}), status_code=202)
+
+    @app.get("/api/runs/{run_id}/tasks/{key}")
+    def get_task(run_id: str, key: str) -> JSONResponse:
+        detail = task_detail(store, cfg, run_id, key)
+        if detail is None:
+            return JSONResponse({"detail": f"no task {key} in run {run_id}"}, status_code=404)
+        return redacted(detail.model_dump())
+
+    @app.post("/api/runs/{run_id}/tasks/{key}/ask")
+    async def ask_task(run_id: str, key: str, body: AskRequest, request: Request) -> JSONResponse:
+        try:
+            await runs.ask(run_id, key, body.question, client=client_of(request))
+        except ControlError as e:
+            return refused(e)
+        return JSONResponse({"run_id": run_id, "key": key, "status": "asking"}, status_code=202)
+
+    @app.post("/api/runs/{run_id}/tasks/{key}/instruct")
+    async def instruct_task(run_id: str, key: str, body: InstructRequest, request: Request) -> JSONResponse:
+        try:
+            resumed = await runs.instruct(run_id, key, body.instruction, client=client_of(request))
         except ControlError as e:
             return refused(e)
         return JSONResponse(redactor.redact_obj({**vars(resumed), "status": "queued"}), status_code=202)

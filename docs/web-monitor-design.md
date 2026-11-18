@@ -1,6 +1,6 @@
 # Web Monitor and Control: Design
 
-Status: W0 and W1 implemented, 2026-09-24; W2, 2026-09-29 (section 12); W3 and W4 are proposals. This extends `design-plan.md` and changes two of
+Status: W0 and W1 implemented, 2026-09-24; W2, 2026-09-29; task details and operator messages, 2026-11-10 (section 12); W3 and W4 are proposals. This extends `design-plan.md` and changes two of
 the decisions in its section 2: intake is no longer CLI-only, because the daemon accepts runs
 over HTTP, and deployment is no longer a foreground CLI only. It keeps the design plan's
 single-user model.
@@ -416,6 +416,36 @@ exits 0. The reply is sent before the server stops listening, and the page then 
 says the daemon is down. Because a requested stop exits 0, the W4 service files must restart the
 daemon only on failure (launchd `KeepAlive: {SuccessfulExit: false}`, systemd
 `Restart=on-failure`); otherwise a shutdown from the page would be undone at once.
+
+Added on 2026-11-10, outside the milestones: **task details and talking to the worker.** A
+blocked task used to show one word (`technical`) on the Agents tab, with no hint that no PR was
+opened or why. Each task's worker row now has a details link, which opens a drawer fed by
+`GET /api/runs/{id}/tasks/{key}` (`status.task_detail`). It shows a one-sentence headline
+(`status.headline`), the stage the task stopped in, the worker's explanation and questions for
+the reporter, the findings report, the branch, worktree, and cost, and the conversation so far.
+Below that is a message box with two actions, offered by one pure rule (`status.task_actions`):
+
+- **Ask** (`POST …/ask`, any task with a worktree): `pipeline/operator.answer` runs the worker
+  with read-only access to the worktree and read-only shares. It resumes the worker's session
+  when the runtime can, so the worker answers from what it did; otherwise a fresh session gets the
+  findings report and the conversation inline. It returns an `OperatorAnswer` (`{answer}`), or
+  plain text when the runtime gives no structured output. The task's state doesn't change. A
+  question holds the run as a resume does: the daemon claims it, so nothing else drives it while
+  the worker answers, keeps its heartbeat fresh, and can cancel it. Afterwards the run is
+  released in the status it had before.
+- **Instruct and retry** (`POST …/instruct`, BLOCKED bugfix tasks): `scheduler.reopen_with_instruction`
+  records the instruction and reopens only that task. A task blocked in WORKING goes back to
+  WORKING. One that stopped later goes to FIXING and keeps its last fix reason. The run is then
+  resumed like `retry_blocked`, but for that one task. `stage_work` resumes the worker's session
+  when the task carries instructions, and the worker and fixer prompts list every instruction
+  (`_instructions.md`), so a later fix round still sees them. Feature tasks are refused, because
+  their worker stages differ and approval and revision already cover that path.
+
+Both control requests are operator-only and audited (`operator_question`, `operator_answer`,
+`instructed`). The conversation is stored in `TaskState.conversation`, and every response passes
+through the redactor as usual. The findings report is served only from inside its run's
+directory. The page renders Markdown with a small DOM builder, so agent text never becomes HTML.
+A CLI equivalent of the two actions does not exist yet.
 
 Open from the W2 exit criterion: a real (not fake) run started from the browser and cancelled
 mid-agent, checking that no agent processes are left behind.

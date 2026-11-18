@@ -1,7 +1,8 @@
 // Agents and Runs tabs: polls /api/agents, /api/runs, and /api/health every 5 s while the page is
 // visible. The Runs tab submits issues with POST /api/runs and cancels, resumes, and retries runs
-// with POST /api/runs/{id}/cancel and /resume. Text from Jira and agents is inserted with
-// textContent only.
+// with POST /api/runs/{id}/cancel and /resume. A task's Details drawer explains where it stands
+// and why it stopped, and lets the operator ask its worker a question or send it back with an
+// instruction. Text from Jira and agents is inserted with textContent only.
 "use strict";
 
 const REFRESH_MS = 5000;
@@ -48,6 +49,12 @@ function cells(a) {
   const link = el("a", { href: a.issue_url, target: "_blank", rel: "noopener", title: a.summary }, a.key);
   issue.append(link);
   if (a.pr_url) issue.append(el("a", { class: "pr", href: a.pr_url, target: "_blank", rel: "noopener" }, "PR"));
+  if (a.role === "worker") {
+    const why = a.status === "blocked" || a.status === "failed";
+    const details = el("button", { type: "button", class: "link", title: `What happened to ${a.key}` }, why ? "why?" : "details");
+    details.addEventListener("click", () => openDetail(a.run_id, a.key));
+    issue.append(details);
+  }
 
   const status = el("td");
   status.append(chip(a.status));
@@ -202,6 +209,19 @@ function actionCell(run) {
   return td;
 }
 
+function taskCell(run) {
+  // one details link per task, so a run that left the Agents tab can still be looked into
+  const td = el("td", { class: "tasks", title: taskSummary(run.tasks) });
+  for (const [key, state] of Object.entries(run.task_states)) {
+    const b = el("button", { type: "button", class: `link task ${state.toLowerCase()}`, title: `${key}: ${state}` },
+      `${key} ${state.toLowerCase()}`);
+    b.addEventListener("click", () => openDetail(run.run_id, key));
+    td.append(b);
+  }
+  if (!td.childNodes.length) td.textContent = "—";
+  return td;
+}
+
 function renderRuns(data) {
   lastRuns = data.runs;
   const body = $("runs");
@@ -214,7 +234,7 @@ function renderRuns(data) {
         el("td", { class: "run", title: r.run_id }, r.run_id + (r.dry_run ? " ·dry" : "")),
         status,
         el("td", { class: "keys" }, r.keys.join(" ")),
-        el("td", { class: "tasks" }, taskSummary(r.tasks)),
+        taskCell(r),
         el("td", { title: r.started }, new Date(r.started).toLocaleString()),
         el("td", { class: "model" }, r.by_this_daemon ? "this daemon" : r.owner || "—"),
         el("td", { class: "num" }, `$${r.cost_usd.toFixed(2)}`),
@@ -261,6 +281,259 @@ async function submitRun(event) {
     showResult(`Could not reach the daemon: ${e.message}`, false);
   } finally {
     button.disabled = false;
+  }
+}
+
+// --- task detail drawer ------------------------------------------------------------------
+// GET /api/runs/{id}/tasks/{key} while the drawer is open; POST .../ask and .../instruct.
+
+let openTask = null; // {run_id, key}
+let lastDetail = "";
+let reportOpen = null; // the operator's choice for the findings <details>, kept across refreshes
+
+function inline(parent, text) {
+  // `code`, **bold**, and [label](https://…) links; everything else is plain text
+  const re = /(`[^`]+`|\*\*[^*]+\*\*|\[[^\]]+\]\((https?:\/\/[^)\s]+)\))/g;
+  let last = 0;
+  let m;
+  while ((m = re.exec(text))) {
+    if (m.index > last) parent.append(text.slice(last, m.index));
+    const t = m[0];
+    if (t.startsWith("`")) parent.append(el("code", {}, t.slice(1, -1)));
+    else if (t.startsWith("**")) parent.append(el("strong", {}, t.slice(2, -2)));
+    else parent.append(el("a", { href: m[2], target: "_blank", rel: "noopener" }, t.slice(1, t.indexOf("]("))));
+    last = re.lastIndex;
+  }
+  if (last < text.length) parent.append(text.slice(last));
+}
+
+function markdown(text) {
+  // headings, lists, fenced code, and paragraphs, built as DOM nodes: agent text never becomes HTML
+  const root = el("div", { class: "md" });
+  const lines = (text || "").replace(/\r\n/g, "\n").split("\n");
+  let list = null;
+  let para = [];
+  const flush = () => {
+    if (para.length) {
+      const p = el("p");
+      inline(p, para.join(" "));
+      root.append(p);
+      para = [];
+    }
+  };
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (line.trimStart().startsWith("```")) {
+      flush();
+      list = null;
+      const code = [];
+      while (++i < lines.length && !lines[i].trimStart().startsWith("```")) code.push(lines[i]);
+      root.append(el("pre", {}, code.join("\n")));
+      continue;
+    }
+    const heading = /^(#{1,6})\s+(.*)$/.exec(line);
+    if (heading) {
+      flush();
+      list = null;
+      const node = el(`h${Math.min(6, heading[1].length + 2)}`);
+      inline(node, heading[2]);
+      root.append(node);
+      continue;
+    }
+    const item = /^\s*([-*]|\d+\.)\s+(.*)$/.exec(line);
+    if (item) {
+      flush();
+      if (!list) {
+        list = el(/\d/.test(item[1]) ? "ol" : "ul");
+        root.append(list);
+      }
+      const li = el("li");
+      inline(li, item[2]);
+      list.append(li);
+      continue;
+    }
+    if (!line.trim()) {
+      flush();
+      list = null;
+      continue;
+    }
+    if (list && /^\s{2,}/.test(line)) {
+      inline(list.lastChild, " " + line.trim());
+      continue;
+    }
+    list = null;
+    para.push(line.trim());
+  }
+  flush();
+  return root;
+}
+
+function section(title, ...children) {
+  const box = el("section");
+  box.append(el("h3", {}, title), ...children);
+  return box;
+}
+
+function link(href, text) {
+  return el("a", { href, target: "_blank", rel: "noopener" }, text);
+}
+
+const SPEAKER = {
+  question: (m) => `You asked (${m.by})`,
+  answer: () => "Worker",
+  instruction: (m) => `You instructed (${m.by})`,
+  error: () => "Error",
+};
+
+function renderDetail(d) {
+  $("detail-title").textContent = `${d.key} · ${d.summary}`;
+  const body = $("detail-body");
+  const scroll = body.scrollTop;
+  const parts = [];
+
+  const meta = el("div", { class: "detail-meta" });
+  meta.append(chip(d.state.toLowerCase()), el("span", { title: d.run_id }, `run ${d.run_id}${d.dry_run ? " · dry run" : ""}`));
+  meta.append(link(d.issue_url, "Jira"));
+  if (d.pr_url) meta.append(link(d.pr_url, "Pull request"));
+  if (d.confluence_url) meta.append(link(d.confluence_url, "Confluence report"));
+  parts.push(meta, el("p", { class: `headline ${d.state}` }, d.headline));
+
+  if (d.questions.length) {
+    const ul = el("ul");
+    for (const q of d.questions) ul.append(el("li", {}, q));
+    parts.push(section("Questions for the reporter", ul));
+  }
+
+  if (d.findings_markdown) {
+    const report = el("details", { class: "report" });
+    report.open = reportOpen ?? d.state === "BLOCKED";
+    report.addEventListener("toggle", () => { reportOpen = report.open; });
+    report.append(el("summary", {}, "Findings report"), markdown(d.findings_markdown));
+    parts.push(section("Why it stopped", report));
+  } else if (d.blocked_details) {
+    parts.push(section("Why it stopped", markdown(d.blocked_details)));
+  } else if (d.state === "FAILED" && d.reason) {
+    parts.push(section("Error", el("pre", { class: "md" }, d.reason)));
+  }
+  if (d.worker_summary && d.state !== "BLOCKED") parts.push(section("Worker's summary", markdown(d.worker_summary)));
+
+  const facts = el("dl", { class: "facts" });
+  const fact = (k, v) => { if (v !== null && v !== undefined && v !== "") facts.append(el("dt", {}, k), el("dd", {}, v)); };
+  fact("Stopped in", d.stopped_at);
+  fact("Fix rounds used", String(d.round));
+  fact("Branch", d.branch);
+  fact("Worktree", d.worktree_path && `${d.worktree_path}${d.worktree_exists ? "" : " (removed)"}`);
+  fact("Changed files", d.changed_paths.join(", "));
+  fact("Cost", `$${d.cost_usd.toFixed(2)}`);
+  parts.push(section("Details", facts));
+
+  if (d.conversation.length || d.answering) {
+    const box = el("div", { class: "messages" });
+    for (const m of d.conversation) {
+      const msg = el("div", { class: `message ${m.kind}` });
+      msg.append(el("div", { class: "who" }, `${SPEAKER[m.kind](m)} · ${new Date(m.ts).toLocaleString()}`), markdown(m.text));
+      box.append(msg);
+    }
+    if (d.answering) box.append(el("p", { class: "answering" }, "The worker is answering…"));
+    parts.push(section("Conversation", box));
+  }
+
+  body.replaceChildren(...parts);
+  body.scrollTop = scroll;
+
+  const canAsk = d.actions.includes("ask");
+  const canInstruct = d.actions.includes("instruct");
+  $("talk").hidden = !(canAsk || canInstruct || d.answering || d.run_status === "running");
+  $("ask").disabled = !canAsk;
+  $("instruct").disabled = !canInstruct;
+  $("talk-text").disabled = !(canAsk || canInstruct);
+  let hint;
+  if (d.answering) hint = "The worker is answering your question; you can write again when it has.";
+  else if (!canAsk && !canInstruct) hint = "The run is busy; you can write to the worker once it stops.";
+  else {
+    hint = canAsk ? "Ask: the worker answers from its own session, read-only; the task does not change. " : "";
+    if (canInstruct) {
+      hint += "Instruct and retry: reopens this task where it stopped and resumes the worker with your instruction; " +
+        "if it then completes, the usual build, tests, review, and pull request follow.";
+    }
+  }
+  $("talk-hint").textContent = hint;
+}
+
+async function refreshDetail() {
+  if (!openTask || document.hidden || stopped) return;
+  const { run_id, key } = openTask;
+  const r = await fetch(`/api/runs/${encodeURIComponent(run_id)}/tasks/${encodeURIComponent(key)}`, { cache: "no-store" });
+  if (!openTask || openTask.run_id !== run_id || openTask.key !== key) return; // closed or switched meanwhile
+  if (!r.ok) {
+    $("detail-body").replaceChildren(el("p", { class: "result bad" }, `Could not load the task: HTTP ${r.status}`));
+    return;
+  }
+  const text = await r.text();
+  if (text === lastDetail) return; // unchanged: keep the reader's place and open sections
+  lastDetail = text;
+  const data = JSON.parse(text);
+  openTask.data = data;
+  renderDetail(data);
+}
+
+function openDetail(run_id, key) {
+  openTask = { run_id, key };
+  lastDetail = "";
+  reportOpen = null;
+  $("detail-title").textContent = key;
+  $("detail-body").replaceChildren(el("p", { class: "empty" }, "Loading…"));
+  $("talk").hidden = true;
+  $("talk-result").hidden = true;
+  $("detail").hidden = false;
+  refreshDetail().catch(() => {});
+}
+
+function closeDetail() {
+  openTask = null;
+  $("detail").hidden = true;
+}
+
+function showTalkResult(text, ok) {
+  const result = $("talk-result");
+  result.textContent = text;
+  result.className = `result ${ok ? "ok" : "bad"}`;
+  result.hidden = false;
+}
+
+async function talk(kind) {
+  if (!openTask || !openTask.data) return;
+  const d = openTask.data;
+  const text = $("talk-text").value.trim();
+  if (!text) {
+    showTalkResult(kind === "ask" ? "Write a question first." : "Write the instruction first.", false);
+    return;
+  }
+  if (kind === "instruct" && !d.dry_run &&
+      !confirm(`Send ${d.key} back to the worker? Run ${d.run_id} is not a dry run: if the worker completes ` +
+               "the task, the orchestrator pushes a branch, opens a draft PR, and writes to Jira.")) return;
+  const buttons = [$("ask"), $("instruct")];
+  buttons.forEach((b) => { b.disabled = true; });
+  try {
+    const r = await fetch(`/api/runs/${encodeURIComponent(d.run_id)}/tasks/${encodeURIComponent(d.key)}/${kind}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(kind === "ask" ? { question: text } : { instruction: text }),
+    });
+    const body = await r.json().catch(() => ({}));
+    if (r.ok) {
+      $("talk-text").value = "";
+      showTalkResult(kind === "ask"
+        ? "Asked. The answer appears in the conversation when the worker replies."
+        : `Run ${d.run_id} queued: ${d.key} goes back to the worker with your instruction.`, true);
+    } else {
+      showTalkResult(typeof body.detail === "string" ? body.detail : `HTTP ${r.status}`, false);
+    }
+  } catch (e) {
+    showTalkResult(`Could not reach the daemon: ${e.message}`, false);
+  } finally {
+    lastDetail = "";
+    refresh();
   }
 }
 
@@ -327,6 +600,7 @@ async function refresh() {
     renderAgents(await agents.json());
     renderRuns(await runs.json());
     renderHealth(await health.json());
+    await refreshDetail();
     failures = 0;
     $("stale").hidden = true;
   } catch (e) {
@@ -339,6 +613,10 @@ for (const tab of document.querySelectorAll(".tab[aria-controls]")) {
 }
 $("submit").addEventListener("submit", submitRun);
 $("shutdown").addEventListener("click", shutdown);
+$("detail-close").addEventListener("click", closeDetail);
+$("ask").addEventListener("click", () => talk("ask"));
+$("instruct").addEventListener("click", () => talk("instruct"));
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && openTask) closeDetail(); });
 $("dry-run").addEventListener("change", () => {
   $("dry-hint").hidden = !$("dry-run").checked;
   $("live-hint").hidden = $("dry-run").checked;

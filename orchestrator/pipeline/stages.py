@@ -178,7 +178,9 @@ async def _run_agent(
     schema: dict[str, Any],
     session: str | None,
     label: str,
+    access: Access | None = None,
 ) -> AgentResult:
+    """Run one agent invocation, recorded in the store and the audit log. `access` overrides the role's."""
     rr = rt.role(role)
     rc = rt.cfg.agents.role(role)
     run_dir = rt.task_dir(task.key) / label
@@ -191,7 +193,7 @@ async def _run_agent(
         role=role,
         schema=schema,
         limits=_limits(rt, role),
-        access=_access(rt, role),
+        access=access or _access(rt, role),
         env=_agent_env(rt, role, task, cwd, run_dir),
         run_dir=run_dir,
         model=rc.model,
@@ -493,6 +495,7 @@ def _prompt_common(rt: Runtime, spec: TaskSpec, task: TaskState, wt: Worktree, r
         "spec_md": spec_markdown(task, with_review=False) if task.spec else "",
         "decisions": task.decisions,
         "interrupted": task.interrupted or "",
+        "instructions": task.instructions,
         "platform": task.platform if task.platform and task.platform != "local" else "",
     }
 
@@ -505,8 +508,9 @@ def _worker_resumes(rt: Runtime, task: TaskState, *, wants: bool) -> bool:
 
 async def stage_work(rt: Runtime, spec: TaskSpec, task: TaskState) -> State:
     wt = _worktree(rt, task)
-    resumed = _worker_resumes(rt, task, wants=False)
-    prompt = rt.render("worker.md", **_prompt_common(rt, spec, task, wt, "worker"))
+    # an instructed worker continues the session in which it reported the task blocked
+    resumed = _worker_resumes(rt, task, wants=bool(task.instructions))
+    prompt = rt.render("worker.md", **_prompt_common(rt, spec, task, wt, "worker"), resumed=resumed)
     result_model: WorkerResult
     result_model, result = await _agent_with_contract(
         rt,

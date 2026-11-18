@@ -63,6 +63,7 @@ These MCP servers are available to you: {% for m in mcp_servers %}`{{ m }}`{% if
 
 The runtime running you failed part-way through (`{{ interrupted }}`); this is the same session, resumed. Everything you wrote is still in the worktree. Check where you left off with `git status` and your own notes, finish the remaining work, and reply with the JSON object. Do not start over.
 {% endif %}
+{% include '_instructions.md' %}
 ## Boundaries
 
 - Do not run {% for d in deny_commands %}`{{ d }}`{% if not loop.last %}, {% endif %}{% endfor %}. The orchestrator pushes and opens the pull request.

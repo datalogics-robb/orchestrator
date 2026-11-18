@@ -25,6 +25,7 @@ The specification is in `.orchestrator/context/spec.md`{% if decisions %} and th
 
 The runtime running you failed part-way through (`{{ interrupted }}`); this is the same session, resumed. Everything you wrote is still in the worktree. Check where you left off with `git status` and your own notes, finish the remaining work, and reply with the JSON object. Do not start over.
 {% endif %}
+{% include '_instructions.md' %}
 ## Boundaries
 
 Same as before: work only in the worktree and granted shares, do not run {% for d in deny_commands %}`{{ d }}`{% if not loop.last %}, {% endif %}{% endfor %}, keep the change focused on the issue, and use `orchestrator-cp` for any share copies — it is the only thing that may write to a share, and it backs up any file it replaces.

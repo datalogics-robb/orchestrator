@@ -101,6 +101,26 @@
     </section>
   </main>
 
+  <aside class="drawer" id="detail" role="dialog" aria-labelledby="detail-title" hidden>
+    <header class="drawer-head">
+      <h2 id="detail-title"></h2>
+      <button type="button" class="action" id="detail-close">Close</button>
+    </header>
+    <div class="drawer-body" id="detail-body"></div>
+    <form class="talk" id="talk" autocomplete="off" hidden>
+      <label class="field">
+        <span>Message to the worker</span>
+        <textarea id="talk-text" rows="4" placeholder="Ask why it stopped, or tell it what to do instead"></textarea>
+      </label>
+      <div class="actions">
+        <button type="button" class="action" id="ask">Ask</button>
+        <button type="button" class="primary" id="instruct">Instruct and retry</button>
+      </div>
+      <p class="hint" id="talk-hint"></p>
+      <p class="result" id="talk-result" role="status" hidden></p>
+    </form>
+  </aside>
+
   <script src="/static/app.js"></script>
 </body>
 </html>

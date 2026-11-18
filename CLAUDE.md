@@ -44,6 +44,8 @@ tokens. `orchestrator.yaml` at the repo root is the user's local, gitignored con
     module's `STAGES` dict.
   - `scheduler.py`: drives tasks, saving state after every transition; handles parallelism,
     dependency order, and retries.
+  - `operator.py`: answers the operator's questions to a task's worker (read-only, in its
+    session); `scheduler.reopen_with_instruction` sends a blocked task back with an instruction.
   - `runtime.py`: `Runtime`, built once per run: config, adapters, secrets, trackers, the store,
     the audit log, and the jinja environment for prompts.
 - `agents/`

@@ -6,6 +6,11 @@ queued the same way, from its checkpoints. Each run then waits for a slot, and f
 successful login probe, before `run_all` drives it. The daemon owns every run it queues: it keeps
 their heartbeats fresh. A run the operator cancels is left `cancelled`; on shutdown the unfinished
 ones are left `interrupted`, which `web.resume_on_start` picks up again.
+
+The operator can also talk to a task's worker. A question (`ask`) holds the run like a resume does,
+so nothing else drives it meanwhile, runs the worker read-only, and hands the run back in the status
+it had. An instruction (`instruct`) reopens one BLOCKED task with the operator's text and resumes the
+run.
 """
 
 from __future__ import annotations
@@ -20,8 +25,9 @@ from pathlib import Path
 
 from orchestrator.config.schema import Config
 from orchestrator.intake.base import KEY_PATTERN, ExplicitKeys, TaskSpec
+from orchestrator.pipeline import operator
 from orchestrator.pipeline.runtime import Runtime, build_runtime
-from orchestrator.pipeline.scheduler import new_task, reopen_for_retry, run_all
+from orchestrator.pipeline.scheduler import new_task, reopen_for_retry, reopen_with_instruction, run_all
 from orchestrator.pipeline.task import TaskState, Workflow
 from orchestrator.reporting.run_report import write_run_report
 from orchestrator.state.store import HEARTBEAT_SECONDS, RunInUse, RunStatus, Store, effective_status
@@ -68,6 +74,20 @@ def parse_keys(keys: list[str]) -> list[str]:
 
 def _print(line: str) -> None:
     print(line, flush=True)
+
+
+def _check_instructable(run_id: str, tasks: dict[str, TaskState], key: str) -> None:
+    task = tasks.get(key)
+    if task is None:
+        raise ControlError(f"run {run_id} has no task {key}", 404)
+    if task.state != "BLOCKED":
+        raise ControlError(
+            f"{key} is {task.state}; only a blocked task can be sent back with instructions", 409
+        )
+    if task.workflow != "bugfix":
+        raise ControlError(
+            f"{key} is a {task.workflow} task; send it back with an approval or revision instead", 409
+        )
 
 
 class RunManager:
@@ -182,9 +202,18 @@ class RunManager:
             return Submitted(rt.run_id, list(tasks), dry_run)
 
     async def resume(
-        self, run_id: str, *, retry_failed: bool = False, retry_blocked: bool = False, client: str
+        self,
+        run_id: str,
+        *,
+        retry_failed: bool = False,
+        retry_blocked: bool = False,
+        instruct: tuple[str, str] | None = None,
+        client: str,
     ) -> Submitted:
-        """Queue a run nothing is driving, from its checkpoints; retried FAILED or BLOCKED tasks are reopened."""
+        """Queue a run nothing is driving, from its checkpoints; retried FAILED or BLOCKED tasks are reopened.
+
+        `instruct` is (key, instruction): that BLOCKED task is reopened with the operator's instruction.
+        """
         async with self._submitting:
             row = self.store.get_run(run_id)
             if row is None:
@@ -192,9 +221,11 @@ class RunManager:
             if run_id in self._runs:
                 raise ControlError(f"run {run_id} is already queued or running in this daemon", 409)
             existing = self.store.load_tasks(run_id)
+            if instruct:
+                _check_instructable(run_id, existing, instruct[0])
             retried = {"FAILED"} if retry_failed else set()
             retried |= {"BLOCKED"} if retry_blocked else set()
-            if not (resumable(existing) or any(t.state in retried for t in existing.values())):
+            if not (instruct or resumable(existing) or any(t.state in retried for t in existing.values())):
                 raise ControlError(
                     f"nothing to resume in run {run_id}: every task is done, blocked, failed, or waiting for "
                     "approval (retry the failed or blocked ones instead)"
@@ -220,12 +251,92 @@ class RunManager:
                     raise ControlError(str(e), 409) from e
                 raise ControlError(f"could not read the issues from Jira: {e}") from e
             reopened = reopen_for_retry(rt, existing, retry_failed=retry_failed, retry_blocked=retry_blocked)
+            if instruct:
+                key, text = instruct
+                reopen_with_instruction(existing[key], text, client)
+                rt.store.save_task(run_id, existing[key])
+                rt.audit.record("instructed", key, client=client, state=existing[key].state, chars=len(text))
+                reopened.append(key)
             rt.audit.record("resumed", client=client, reopened=reopened, dry_run=row.dry_run)
             self.log(
                 f"run {run_id} queued to resume" + (f", retrying {' '.join(reopened)}" if reopened else "")
             )
             await self._start(rt, specs, existing, None)
             return Submitted(run_id, [s.key for s in specs], row.dry_run)
+
+    async def instruct(self, run_id: str, key: str, instruction: str, *, client: str) -> Submitted:
+        """Reopen a BLOCKED bugfix task with the operator's instruction and queue its run."""
+        if not instruction.strip():
+            raise ControlError("write the instruction for the worker first")
+        return await self.resume(run_id, instruct=(key, instruction.strip()), client=client)
+
+    async def ask(self, run_id: str, key: str, question: str, *, client: str) -> None:
+        """Ask a task's worker a question; it answers in the background, into the task's conversation.
+
+        The run is held while the worker answers, so it cannot be resumed (or asked again) meanwhile,
+        and the operator can cancel it like a run. Afterwards it is left in the status it had.
+        """
+        question = question.strip()
+        if not question:
+            raise ControlError("write a question for the worker first")
+        async with self._submitting:
+            row = self.store.get_run(run_id)
+            if row is None:
+                raise ControlError(f"no run {run_id}", 404)
+            if run_id in self._runs:
+                raise ControlError(f"run {run_id} is busy in this daemon; ask again when it stops", 409)
+            tasks = self.store.load_tasks(run_id)
+            task = tasks.get(key)
+            if task is None:
+                raise ControlError(f"run {run_id} has no task {key}", 404)
+            try:
+                operator.check_askable(task)
+            except operator.CannotAsk as e:
+                raise ControlError(str(e), 409) from e
+            left = effective_status(row, any_paused=any(t.paused for t in tasks.values()))
+            try:
+                rt = await asyncio.to_thread(
+                    build_runtime,
+                    self.cfg,
+                    self.config_path,
+                    run_id=run_id,
+                    dry_run=row.dry_run,
+                    tracker=self.tracker_factory() if self.tracker_factory else None,
+                )
+            except Exception as e:  # noqa: BLE001 - a missing secret, an unreachable clone
+                raise ControlError(f"could not set up the run: {e}") from e
+            try:
+                rt.store.claim_run(run_id, status="running", via=row.via or "daemon")
+            except RunInUse as e:
+                await rt.aclose()
+                raise ControlError(str(e), 409) from e
+            task.say("question", question, client)
+            rt.store.save_task(run_id, task)
+            rt.audit.record("operator_question", key, client=client, chars=len(question))
+            self.log(f"run {run_id} {key}: question from {client}")
+            self._runs[run_id] = asyncio.create_task(self._answer(rt, task, question, left))
+            await asyncio.sleep(0)
+
+    async def _answer(self, rt: Runtime, task: TaskState, question: str, left: RunStatus) -> None:
+        try:
+            await operator.answer(rt, task, question)
+            self.log(f"run {rt.run_id} {task.key}: answered")
+        except asyncio.CancelledError:
+            client = self._cancelled.pop(rt.run_id, None)
+            if client is not None:
+                task.say("error", "The question was cancelled before the worker answered.", client)
+                rt.audit.record("cancelled", task.key, client=client)
+            else:
+                task.say("error", "The daemon shut down before the worker answered.", "daemon")
+            raise
+        except Exception as e:  # noqa: BLE001 - the daemon outlives any one question
+            rt.audit.record("operator_answer_failed", task.key, error=repr(e))
+            self.log(rt.redactor.redact(f"run {rt.run_id} {task.key}: could not answer: {e!r}"))
+        finally:
+            rt.store.save_task(rt.run_id, task)
+            rt.store.release_run(rt.run_id, left)
+            await rt.aclose()
+            self._runs.pop(rt.run_id, None)
 
     async def resume_interrupted(self, scan: int = 50) -> list[str]:
         """Queue every interrupted run a daemon was driving (`web.resume_on_start`). Returns their ids."""
