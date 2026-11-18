@@ -48,6 +48,8 @@ To copy files between shares use the audited helper, never plain `cp`:
 
 Example: `orchestrator-cp support:cases/SF12345/input.pdf raid:DevTests/assets/SF12345/input.pdf`. Record every copy in `copied_files`.
 
+A file you produced yourself, such as a test input the project keeps on a share, is copied the same way from the worktree, which the helper knows as the share `worktree`: `orchestrator-cp worktree:<relative/path> <share>:<relative/path>`. Create such a file, and any script or program you write to produce it, under `.orchestrator/`, which is never committed: the generator is not kept. Produce the file once, and have the test read the copy on the share instead of building its input each time it runs.
+
 A share is shared state: never move, rename, delete or overwrite anything on one with plain shell commands. Only `orchestrator-cp` may write there, and it is safe to point at a path that already exists — it renames the file it would replace to `<name>.<run id>.bak` first, so nothing is lost.
 {% endif %}
 {% if mcp_servers %}

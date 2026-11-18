@@ -525,3 +525,24 @@ def test_mcp_passthrough(config_dict: dict, tmp_path: Path) -> None:
     with pytest.raises(passthrough.MCPError, match="other"):
         passthrough.servers_for_role(cfg, "reviewer")
     assert any(p.level == "error" for p in passthrough.check_mcp(cfg))
+
+
+def test_cp_copies_a_generated_file_from_the_worktree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from orchestrator.agents.base import PathGrant
+    from orchestrator.shares.grants import stage_helper
+
+    raid, worktree = tmp_path / "raid", tmp_path / "wt"
+    (raid / "tests").mkdir(parents=True)
+    (worktree / ".orchestrator").mkdir(parents=True)
+    (worktree / ".orchestrator" / "input.pdf").write_bytes(b"%PDF-1.7 generated")
+    grants = (PathGrant(name="raid", path=raid, mode="read-write", write_under=(raid / "tests",)),)
+    _, env = stage_helper(tmp_path / "run", grants, tmp_path / "audit.jsonl", worktree)
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    assert cp.main(["worktree:.orchestrator/input.pdf", "raid:tests/SF1/input.pdf"]) == 0
+    assert (raid / "tests" / "SF1" / "input.pdf").read_bytes() == b"%PDF-1.7 generated"
+    assert '"share_copy"' in (tmp_path / "audit.jsonl").read_text(encoding="utf-8")
+    assert cp.main(["raid:tests/SF1/input.pdf", "worktree:stolen.pdf"]) == 1  # a source only
+    assert cp.main(["worktree:../raid/tests/SF1/input.pdf", "raid:tests/x.pdf"]) == 1  # escape

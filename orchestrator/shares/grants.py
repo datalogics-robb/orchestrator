@@ -12,6 +12,9 @@ from orchestrator.agents.base import PathGrant, Problem
 from orchestrator.config.schema import Config, Role
 from orchestrator.shares import cp
 
+WORKTREE_SHARE = "worktree"
+"""The name `orchestrator-cp` gives the task's worktree: a source only, never a destination."""
+
 
 class ShareError(Exception):
     pass
@@ -42,9 +45,12 @@ def grants_manifest(grants: tuple[PathGrant, ...]) -> list[dict[str, object]]:
 
 
 def stage_helper(
-    run_dir: Path, grants: tuple[PathGrant, ...], audit_path: Path
+    run_dir: Path, grants: tuple[PathGrant, ...], audit_path: Path, worktree: Path | None = None
 ) -> tuple[Path, dict[str, str]]:
     """Write the grants manifest and a PATH shim for orchestrator-cp.
+
+    With `worktree`, the manifest also lists it as the read-only share `worktree`, so a file
+    the agent produced can be copied to a share through the audited helper like any other.
 
     The shim is a shell script, which Git Bash also runs on Windows; Windows gets an
     `orchestrator-cp.cmd` beside it for agents whose commands run in cmd or PowerShell.
@@ -53,7 +59,10 @@ def stage_helper(
     bin_dir = run_dir / "bin"
     bin_dir.mkdir(parents=True, exist_ok=True)
     manifest = run_dir / "grants.json"
-    manifest.write_text(json.dumps(grants_manifest(grants), indent=2), encoding="utf-8")
+    entries = grants_manifest(grants)
+    if worktree is not None:
+        entries.append({"name": WORKTREE_SHARE, "path": str(worktree), "mode": "read", "write_under": []})
+    manifest.write_text(json.dumps(entries, indent=2), encoding="utf-8")
     python = Path(sys.executable)
     script = Path(cp.__file__).resolve()
     shim = bin_dir / "orchestrator-cp"

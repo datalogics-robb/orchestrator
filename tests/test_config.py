@@ -36,6 +36,12 @@ def test_undeclared_share_rejected(config_dict: dict) -> None:
         Config.model_validate(config_dict)
 
 
+def test_worktree_is_a_reserved_share_name(config_dict: dict) -> None:
+    config_dict["shares"]["worktree"] = config_dict["shares"]["support"]
+    with pytest.raises(Exception, match="reserved"):
+        Config.model_validate(config_dict)
+
+
 def test_read_write_share_needs_workspace_write(config_dict: dict) -> None:
     config_dict["agents"]["reviewer"]["shares"]["raid"] = "read-write"
     with pytest.raises(Exception, match="workspace-write"):

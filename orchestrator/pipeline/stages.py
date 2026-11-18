@@ -63,7 +63,7 @@ def _context_dir(wt: Worktree) -> Path:
 
 def _agent_env(rt: Runtime, role: Role, task: TaskState, wt_path: Path, run_dir: Path) -> dict[str, str]:
     rr = rt.role(role)
-    bin_dir, helper_env = stage_helper(run_dir, rr.grants, rt.audit.path)
+    bin_dir, helper_env = stage_helper(run_dir, rr.grants, rt.audit.path, wt_path)
     extra = dict(rt.cfg.build.env)
     extra.update(helper_env)
     extra[TASK_ENV] = task.key

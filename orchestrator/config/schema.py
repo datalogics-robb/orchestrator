@@ -647,6 +647,10 @@ class Config(StrictModel):
                     raise ValueError(
                         f"agents.{role_name}.shares.{share}: read-write needs access: workspace-write"
                     )
+        if "worktree" in self.shares:
+            raise ValueError(
+                "shares: 'worktree' is reserved; orchestrator-cp uses it for the task's worktree"
+            )
         if "local" in self.platforms:
             raise ValueError("platforms: 'local' is reserved; it means the orchestrator host")
         if self.test.selection.strategy == "named-suite" and not self.test.selection.commands:

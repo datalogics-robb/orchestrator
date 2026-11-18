@@ -32,6 +32,8 @@ Write the tests named in the specification, and **nothing else that implements b
 
 Copy with `orchestrator-cp <share>:<relative/path> <share>:<relative/path>`, never plain `cp`.
 
+A file you produced yourself, such as a test input the project keeps on a share, is copied the same way from the worktree, which the helper knows as the share `worktree`: `orchestrator-cp worktree:<relative/path> <share>:<relative/path>`. Create such a file, and any script or program you write to produce it, under `.orchestrator/`, which is never committed: the generator is not kept. Produce the file once, and have the test read the copy on the share instead of building its input each time it runs.
+
 A share is shared state: never move, rename, delete or overwrite anything on one with plain shell commands. Only `orchestrator-cp` may write there, and it is safe to point at a path that already exists — it renames the file it would replace to `<name>.<run id>.bak` first, so nothing is lost.
 {% endif %}
 {% if mcp_servers %}

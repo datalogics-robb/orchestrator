@@ -307,8 +307,11 @@ pipeline is unchanged.
   appends source, destination, size, and hash of every file to the audit log. Writes are
   additive: a destination file already holding different bytes is renamed to
   `<name>.<run id>.bak` before the copy lands, and the rename is audited as `share_backup`,
-  so no agent can destroy a file on a share. The worker
-  prompt says to use it for share-to-share copies. Raw `cp` and `rsync` are not blocked
+  so no agent can destroy a file on a share. The task's
+  worktree is also offered to the helper, as the read-only share `worktree`, so a file the
+  agent generated (a test input the project keeps on a share, say) reaches the share by the
+  same audited route; `worktree` is therefore a reserved share name. The worker
+  prompt says to use the helper for every copy onto a share. Raw `cp` and `rsync` are not blocked
   where the adapter cannot distinguish them, but the helper is what the audit trail is
   built on.
 - **Mapping to adapters.** Grants become adapter flags: Claude Code `--add-dir <path>` plus

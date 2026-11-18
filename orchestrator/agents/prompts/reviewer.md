@@ -51,7 +51,7 @@ The full test suite was **not** run. If the change needs tests that did not run,
 Author's test rationale: {{ worker.test_rationale }}
 {% endif %}
 {% if worker.copied_files %}
-Files the author copied between network shares (confirm they landed where the issue asked; you have read access to the shares):
+Files the author copied onto network shares (confirm they landed where the issue asked; you have read access to the shares):
 {% for c in worker.copied_files %}
 - `{{ c['from'] }}` -> `{{ c['to'] }}`
 {%- endfor %}
@@ -74,6 +74,7 @@ The diff is large; read it from `{{ diff_path }}` or run `git diff origin/{{ bas
 - Scope: nothing unrelated, no new dependencies or network calls the issue did not ask for.
 - Security: no credentials, no customer data committed, no unsafe handling of input.
 - Consistency with the standards in the Confluence pages, when present.
+- Consistency with the repository's own contributor instructions (`AGENTS.md`, `CLAUDE.md`, `CONTRIBUTING.md`, and files they point to), when present: read them. Where they say tests take their input from a file on a share, a test that builds that input itself when it runs is a `major` finding.
 
 ## Reply
 

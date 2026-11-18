@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""orchestrator-cp: audited share-to-share copy for agents. Standard library only.
+"""orchestrator-cp: audited copy onto a share for agents. Standard library only.
 
 Usage: orchestrator-cp <share>:<relative-path> <share>:<relative-path>
 
-Sources must lie under a granted share; destinations under a read-write grant and, when
-write roots are configured, under one of them. Symlinks that escape a share are refused.
+Sources must lie under a granted share, or under the task's worktree, which is the read-only
+share `worktree`; destinations under a read-write grant and, when write roots are configured,
+under one of them. Symlinks that escape a share are refused.
 A destination file that already holds different bytes is never overwritten in place: it is
 renamed to `<name>.<run id>.bak` first, so a share keeps every version an agent replaced.
 Every copied file is appended to the audit log with its size and SHA-256.
