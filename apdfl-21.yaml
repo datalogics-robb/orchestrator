@@ -83,7 +83,7 @@ test:
     - invoke -e test --config=Release
 
 agents:
-  review_rounds: 2
+  review_rounds: 12
   prompt_overrides: {}
   worker:
     runner: claude-code
@@ -104,8 +104,8 @@ agents:
     runner: codex
     model: gpt-6.1-sol
     access: read-only
-    timeout_minutes: 60
-    max_budget_usd: 5
+    timeout_minutes: 300
+    max_budget_usd: 50
     auth:
       use_cli_login: true
     shares:
