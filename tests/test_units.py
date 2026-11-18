@@ -295,7 +295,9 @@ def test_build_env_scrubs() -> None:
         prepend_path=[Path("/tools")],
     )
     assert "GITHUB_TOKEN" not in env and "VIRTUAL_ENV" not in env and "PYTHONPATH" not in env
-    assert "PYTHONWARNINGS" not in env and env["PIP_CACHE_DIR"] == "/c"
+    assert "PYTHONWARNINGS" not in env
+    # pip refuses a cache directory that is not absolute: on Windows "/c" gains the drive
+    assert env["PIP_CACHE_DIR"] == str(Path("/c").absolute()) and os.path.isabs(env["PIP_CACHE_DIR"])
     assert env["ANTHROPIC_API_KEY"] == "k" and env["CC"] == "clang"
     assert env["PATH"].startswith(str(Path("/tools")) + os.pathsep)
 

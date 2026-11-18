@@ -89,7 +89,9 @@ def build_env(
     for k, v in (extra or {}).items():
         if k.startswith(_DROP_PREFIXES) and k not in ("PIP_CACHE_DIR",):
             continue
-        env[k] = v
+        # pip asserts its cache directory is absolute, and on Windows a rooted path with no
+        # drive (`/Users/me/cache`) is not
+        env[k] = str(Path(v).absolute()) if k == "PIP_CACHE_DIR" else v
     for k, v in (secrets or {}).items():
         env[k] = v
     return env
